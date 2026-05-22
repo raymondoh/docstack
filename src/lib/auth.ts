@@ -1,4 +1,5 @@
 import { NextAuthOptions } from "next-auth";
+
 import CredentialsProvider from "next-auth/providers/credentials";
 import { adminAuth } from "@/lib/firebase/admin";
 import GoogleProvider from "next-auth/providers/google";

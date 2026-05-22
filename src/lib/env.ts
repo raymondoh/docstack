@@ -4,6 +4,7 @@ import { z } from "zod";
 export const env = createEnv({
   server: {
     // Auth & NextAuth
+    ADMIN_EMAIL: z.string().email(),
     NEXTAUTH_URL: z.string().url().default("http://localhost:3000"),
     NEXTAUTH_SECRET: z.string().min(1),
     GOOGLE_CLIENT_ID: z.string().min(1),

@@ -1,39 +1,29 @@
 "use server";
 
-import { adminDb } from "@/lib/firebase/admin";
-import { productSchema, type Product } from "@/lib/schemas";
-import { getServerSession } from "next-auth";
-import { authOptions } from "@/lib/auth";
 import { revalidatePath } from "next/cache";
 import { ZodError } from "zod";
+import { getServerSession } from "next-auth";
+import { authOptions } from "@/lib/auth";
+
 import { env } from "@/lib/env";
-
-//const ADMIN_EMAIL = "raymondmhylton@gmail.com";
-// 1. Verify Admin Status securely on the server using the env variable
-// const session = await getServerSession(authOptions);
-// if (!session?.user || session.user.email !== process.env.ADMIN_EMAIL) {
-//   throw new Error("Unauthorized access");
-// }
-const session = await getServerSession(authOptions);
-
-if (!session?.user || session.user.email !== process.env.ADMIN_EMAIL) {
-  throw new Error("Unauthorized access");
-}
+import { adminDb } from "@/lib/firebase/admin";
+import { productSchema, type Product } from "@/lib/schemas";
 
 type CreateProductInput = Omit<Product, "id" | "createdAt" | "updatedAt">;
 
+async function requireAdmin() {
+  const session = await getServerSession(authOptions);
+
+  if (!session?.user || session.user.email !== env.ADMIN_EMAIL) {
+    throw new Error("Unauthorized access");
+  }
+
+  return session;
+}
+
 export async function createProduct(formData: CreateProductInput) {
   try {
-    // const session = await getServerSession(authOptions);
-
-    // if (!session?.user || session.user.email !== env.ADMIN_EMAIL) {
-    //   throw new Error("Unauthorized access");
-    // }
-    const session = await getServerSession(authOptions);
-
-    if (!session?.user || session.user.email !== process.env.ADMIN_EMAIL) {
-      throw new Error("Unauthorized access");
-    }
+    await requireAdmin();
 
     const docRef = adminDb.collection("products").doc();
 
