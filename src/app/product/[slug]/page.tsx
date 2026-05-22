@@ -8,6 +8,7 @@ import { CheckoutButton } from "@/components/checkout-button";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { GoogleSignInButton } from "@/components/google-signin-button";
+import { siteConfig } from "@/config/siteConfig";
 
 // 1. Generate Dynamic SEO Metadata for sharing links
 export async function generateMetadata({ params }: { params: Promise<{ slug: string }> }) {
@@ -18,7 +19,7 @@ export async function generateMetadata({ params }: { params: Promise<{ slug: str
 
   const product = snap.docs[0].data() as Product;
   return {
-    title: `${product.title} | Dollar Download`,
+    title: `${product.title} | ${siteConfig.name}`,
     description: product.description
   };
 }

@@ -1,5 +1,6 @@
 import * as React from "react";
 import { Order } from "@/lib/schemas";
+import { siteConfig } from "@/config/siteConfig";
 
 interface ReceiptEmailProps {
   order: Order;
@@ -27,16 +28,16 @@ export function ReceiptEmail({ order }: Readonly<ReceiptEmailProps>) {
               alignItems: "center",
               justifyContent: "center",
               fontWeight: "bold",
-              fontSize: "16px",
+              fontSize: "14px",
               marginBottom: "16px"
             }}>
-            D
+            DS
           </div>
           <h1 style={{ fontSize: "24px", fontWeight: "600", margin: "0 0 8px 0", letterSpacing: "-0.5px" }}>
             Your templates are ready
           </h1>
           <p style={{ margin: 0, color: "#71717a", fontSize: "15px" }}>
-            Thank you for your purchase from Dollar Download.
+            Thank you for your purchase from {siteConfig.name}.
           </p>
         </div>
 

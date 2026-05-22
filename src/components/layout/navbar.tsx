@@ -3,6 +3,7 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { UserAccountNav } from "./user-account-nav";
 import { LogIn } from "lucide-react";
+import { siteConfig } from "@/config/siteConfig";
 
 export async function Navbar() {
   const session = await getServerSession(authOptions);
@@ -16,10 +17,10 @@ export async function Navbar() {
         {/* Brand Logo */}
         <Link href="/" className="flex items-center gap-2 transition-opacity hover:opacity-80">
           <div className="flex h-8 w-8 items-center justify-center rounded-md bg-foreground text-background font-bold">
-            D
+            DS
           </div>
           <span className="text-lg font-bold tracking-tight text-foreground hidden sm:inline-block">
-            Dollar Download
+            {siteConfig.name}
           </span>
         </Link>
 

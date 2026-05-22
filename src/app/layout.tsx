@@ -6,12 +6,13 @@ import { NextAuthProvider } from "@/components/providers/session-provider";
 import { Header } from "@/components/header/header";
 import { Navbar } from "@/components/layout/navbar";
 import "./globals.css";
+import { siteConfig } from "@/config/siteConfig";
 
 const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "Dollar Download | Premium Business Templates",
-  description: "Professional business templates. Just $1."
+  title: `${siteConfig.name} | Premium Business Templates`,
+  description: siteConfig.description
 };
 
 export default function RootLayout({

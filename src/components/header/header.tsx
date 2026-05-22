@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
+import { siteConfig } from "@/config/siteConfig";
 
 export function Header() {
   return (
@@ -13,7 +14,7 @@ export function Header() {
             <div className="h-6 w-6 rounded bg-foreground flex items-center justify-center">
               <span className="text-background font-bold text-xs">D</span>
             </div>
-            <span className="font-bold tracking-tight text-foreground">Dollar Download</span>
+            <span className="font-bold tracking-tight text-foreground">{siteConfig.name}</span>
           </Link>
         </div>
 
