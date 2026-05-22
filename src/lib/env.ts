@@ -9,9 +9,12 @@ export const env = createEnv({
     GOOGLE_CLIENT_ID: z.string().min(1),
     GOOGLE_CLIENT_SECRET: z.string().min(1),
 
-    // Firebase Admin
-    FIREBASE_CLIENT_EMAIL: z.string().email(),
-    FIREBASE_PRIVATE_KEY: z.string().min(1),
+    // Firebase Admin - preferred primary credential source:
+    // FIREBASE_SERVICE_ACCOUNT_JSON should contain the full service account JSON.
+    FIREBASE_SERVICE_ACCOUNT_JSON: z.string().min(1).optional(),
+    FIREBASE_PROJECT_ID: z.string().min(1).optional(),
+    FIREBASE_CLIENT_EMAIL: z.string().email().optional(),
+    FIREBASE_PRIVATE_KEY: z.string().min(1).optional(),
 
     // Stripe
     STRIPE_SECRET_KEY: z.string().startsWith("sk_"),
