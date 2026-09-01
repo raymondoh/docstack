@@ -13,10 +13,12 @@ The proposed `authIdentityKeys` uniqueness collection is deliberately deferred u
 Before production deployment, run the read-only inventory deliberately with the exact Firebase project ID:
 
 ```sh
-npm run auth:inventory -- --project-id=<exact-project-id> --confirm=READ_ONLY_AUTH_INVENTORY
+npm run auth:inventory -- \
+  --project-id=docstack-b46f1 \
+  --confirm=READ_ONLY_AUTH_INVENTORY
 ```
 
-The command refuses to run without both values, performs no writes, reads large application collections in bounded pages, and never selects order email fields. Review malformed identity diagnostics, checkout attempts without owned orders, adapter mapping duplicates, the representative Google lookup, and any existing data in `users`, `accounts`, `sessions`, `verificationTokens`, or `authIdentityKeys` before enabling the adapter. A legacy order ID must not be asserted to be a Google subject from an email match; identities without authoritative provider evidence must bootstrap on a fresh Google login or be handled manually.
+The npm script runs the standalone process in development mode and loads `.env.development.local` through Node's native `--env-file` support. The inventory still refuses to run without both explicit values, performs no writes, reads large application collections in bounded pages, and never selects order email fields. Review malformed identity diagnostics, checkout attempts without owned orders, adapter mapping duplicates, the representative Google lookup, and any existing data in `users`, `accounts`, `sessions`, `verificationTokens`, or `authIdentityKeys` before enabling the adapter. A legacy order ID must not be asserted to be a Google subject from an email match; identities without authoritative provider evidence must bootstrap on a fresh Google login or be handled manually.
 
 ## Firestore Emulator integration test
 
