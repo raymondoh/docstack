@@ -10,8 +10,10 @@ export const env = createEnv({
     GOOGLE_CLIENT_ID: z.string().min(1),
     GOOGLE_CLIENT_SECRET: z.string().min(1),
 
-    // Firebase Admin - preferred primary credential source:
-    // FIREBASE_SERVICE_ACCOUNT_JSON should contain the full service account JSON.
+    // Firebase Admin
+    // Local development can point to a service-account JSON file.
+    // Deployment can continue using the JSON/env credential methods below.
+    FIREBASE_SERVICE_ACCOUNT_PATH: z.string().min(1).optional(),
     FIREBASE_SERVICE_ACCOUNT_JSON: z.string().min(1).optional(),
     FIREBASE_PROJECT_ID: z.string().min(1).optional(),
     FIREBASE_CLIENT_EMAIL: z.string().email().optional(),
@@ -23,12 +25,14 @@ export const env = createEnv({
 
     // Resend
     RESEND_API_KEY: z.string().startsWith("re_"),
+    EMAIL_FROM: z.string().min(1),
     SUPPORT_EMAIL: z.string().email().default("support@yourstore.com"),
+    FULFILLMENT_RECONCILIATION_SECRET: z.string().min(32).optional(),
 
     // Algolia Admin (For indexing)
     ALGOLIA_ADMIN_API_KEY: z.string().min(1).optional(),
 
-    NODE_ENV: z.enum(["development", "test", "production"])
+    NODE_ENV: z.enum(["development", "test", "production"]),
   },
 
   client: {
@@ -44,7 +48,7 @@ export const env = createEnv({
 
     // Algolia Public
     NEXT_PUBLIC_ALGOLIA_APP_ID: z.string().min(1).optional(),
-    NEXT_PUBLIC_ALGOLIA_SEARCH_ONLY_KEY: z.string().min(1).optional()
+    NEXT_PUBLIC_ALGOLIA_SEARCH_ONLY_KEY: z.string().min(1).optional(),
   },
 
   // For Next.js App Router, we must manually destructure the client variables
@@ -57,10 +61,10 @@ export const env = createEnv({
     NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID: process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
     NEXT_PUBLIC_FIREBASE_APP_ID: process.env.NEXT_PUBLIC_FIREBASE_APP_ID,
     NEXT_PUBLIC_ALGOLIA_APP_ID: process.env.NEXT_PUBLIC_ALGOLIA_APP_ID,
-    NEXT_PUBLIC_ALGOLIA_SEARCH_ONLY_KEY: process.env.NEXT_PUBLIC_ALGOLIA_SEARCH_ONLY_KEY
+    NEXT_PUBLIC_ALGOLIA_SEARCH_ONLY_KEY: process.env.NEXT_PUBLIC_ALGOLIA_SEARCH_ONLY_KEY,
   },
 
   // Skip validation for Jest/Vitest or during the build phase if needed
   skipValidation: process.env.NODE_ENV === "test" || !!process.env.SKIP_ENV_VALIDATION,
-  emptyStringAsUndefined: true
+  emptyStringAsUndefined: true,
 });

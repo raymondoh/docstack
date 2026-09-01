@@ -48,7 +48,9 @@ export default async function AdminOrdersPage() {
                   {/* Customer Column */}
                   <td className="px-6 py-4">
                     <div className="flex items-center gap-2">
-                      <span className="font-medium text-foreground">{order.customerEmail}</span>
+                      <span className="font-medium text-foreground">
+                        {order.deliveryEmail || order.checkoutEmail || order.customerEmail || "Email unavailable"}
+                      </span>
                       {order.deliveryEmailSent && (
                         <span title="Delivery Email Sent" aria-label="Delivery Email Sent">
                           <CheckCircle2 className="h-3 w-3 text-emerald-500" />

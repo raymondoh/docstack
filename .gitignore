@@ -54,3 +54,6 @@ yarn-error.log*
 
 # --- Miscellaneous ---
 /coverage
+
+# Local credentials
+/secrets/

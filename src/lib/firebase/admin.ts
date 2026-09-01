@@ -1,5 +1,7 @@
 import * as admin from "firebase-admin";
 import { getApps } from "firebase-admin/app";
+import { readFileSync } from "node:fs";
+import { isAbsolute, resolve } from "node:path";
 import { env } from "@/lib/env";
 
 /**
@@ -16,39 +18,64 @@ type FirebaseServiceAccountPayload = {
 
 function requireServerString(value: string | undefined, name: string) {
   const normalized = value?.trim();
+
   if (!normalized) {
-    throw new Error(`[firebase-admin] Missing required Firebase Admin env var: ${name}`);
+    throw new Error(`[firebase-admin] Missing required Firebase Admin credential: ${name}`);
   }
+
   return normalized;
 }
 
-function parseServiceAccountJson(rawJson: string | undefined) {
-  if (!rawJson?.trim()) {
-    return null;
-  }
-
+function parseServiceAccountJson(rawJson: string, source: string) {
   try {
     const parsed = JSON.parse(rawJson) as FirebaseServiceAccountPayload;
 
     return {
-      projectId: requireServerString(parsed.project_id, "FIREBASE_SERVICE_ACCOUNT_JSON.project_id"),
-      clientEmail: requireServerString(parsed.client_email, "FIREBASE_SERVICE_ACCOUNT_JSON.client_email"),
-      privateKey: formatPrivateKey(requireServerString(parsed.private_key, "FIREBASE_SERVICE_ACCOUNT_JSON.private_key"))
+      projectId: requireServerString(parsed.project_id, `${source}.project_id`),
+      clientEmail: requireServerString(parsed.client_email, `${source}.client_email`),
+      privateKey: formatPrivateKey(requireServerString(parsed.private_key, `${source}.private_key`)),
     };
   } catch (error: unknown) {
+    throw new Error(`[firebase-admin] ${source} is invalid JSON: ${(error as Error)?.message ?? String(error)}`);
+  }
+}
+
+function loadServiceAccountFile(filePath: string | undefined) {
+  const normalizedPath = filePath?.trim();
+
+  if (!normalizedPath) {
+    return null;
+  }
+
+  const resolvedPath = isAbsolute(normalizedPath) ? normalizedPath : resolve(process.cwd(), normalizedPath);
+
+  try {
+    const rawJson = readFileSync(resolvedPath, "utf8");
+
+    return parseServiceAccountJson(rawJson, `Firebase service account file (${resolvedPath})`);
+  } catch (error: unknown) {
     throw new Error(
-      `[firebase-admin] FIREBASE_SERVICE_ACCOUNT_JSON is invalid JSON: ${(error as Error)?.message ?? String(error)}`
+      `[firebase-admin] Unable to read Firebase service account file at ${resolvedPath}: ${
+        (error as Error)?.message ?? String(error)
+      }`,
     );
   }
 }
 
 function getFirebaseAdminCredentials() {
-  const serviceAccount = parseServiceAccountJson(env.FIREBASE_SERVICE_ACCOUNT_JSON);
+  // Preferred for local development.
+  const fileCredentials = loadServiceAccountFile(env.FIREBASE_SERVICE_ACCOUNT_PATH);
 
-  if (serviceAccount) {
-    return serviceAccount;
+  if (fileCredentials) {
+    return fileCredentials;
   }
 
+  // Useful for deployed environments such as Vercel.
+  if (env.FIREBASE_SERVICE_ACCOUNT_JSON?.trim()) {
+    return parseServiceAccountJson(env.FIREBASE_SERVICE_ACCOUNT_JSON, "FIREBASE_SERVICE_ACCOUNT_JSON");
+  }
+
+  // Legacy/fallback individual environment variables.
   const projectId = env.FIREBASE_PROJECT_ID?.trim();
   const clientEmail = env.FIREBASE_CLIENT_EMAIL?.trim();
   const privateKey = env.FIREBASE_PRIVATE_KEY?.trim();
@@ -57,12 +84,12 @@ function getFirebaseAdminCredentials() {
     return {
       projectId,
       clientEmail,
-      privateKey: formatPrivateKey(privateKey)
+      privateKey: formatPrivateKey(privateKey),
     };
   }
 
   throw new Error(
-    "[firebase-admin] Missing Firebase Admin credentials. Provide FIREBASE_SERVICE_ACCOUNT_JSON, or fallback FIREBASE_PROJECT_ID/FIREBASE_CLIENT_EMAIL/FIREBASE_PRIVATE_KEY."
+    "[firebase-admin] Missing Firebase Admin credentials. Provide FIREBASE_SERVICE_ACCOUNT_PATH, FIREBASE_SERVICE_ACCOUNT_JSON, or FIREBASE_PROJECT_ID/FIREBASE_CLIENT_EMAIL/FIREBASE_PRIVATE_KEY.",
   );
 }
 
@@ -79,9 +106,9 @@ export function getFirebaseAdmin() {
     credential: admin.credential.cert({
       projectId: credentials.projectId,
       clientEmail: credentials.clientEmail,
-      privateKey: credentials.privateKey
+      privateKey: credentials.privateKey,
     }),
-    storageBucket: env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET
+    storageBucket: env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET,
   });
 }
 

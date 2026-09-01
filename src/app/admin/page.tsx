@@ -18,7 +18,7 @@ export default async function AdminOverviewPage() {
     <div className="flex flex-col gap-8">
       <div>
         <h1 className="text-3xl font-bold tracking-tight text-foreground">Dashboard</h1>
-        <p className="mt-2 text-muted-foreground">Your store's high-level metrics and performance.</p>
+        <p className="mt-2 text-muted-foreground">Your store&apos;s high-level metrics and performance.</p>
       </div>
 
       {/* --- METRICS GRID --- */}
@@ -82,7 +82,9 @@ export default async function AdminOverviewPage() {
               key={order.id}
               className="flex items-center justify-between p-4 px-6 text-sm hover:bg-muted/10 transition-colors">
               <div className="flex flex-col">
-                <span className="font-medium text-foreground">{order.customerEmail}</span>
+                <span className="font-medium text-foreground">
+                  {order.deliveryEmail || order.checkoutEmail || order.customerEmail || "Email unavailable"}
+                </span>
                 <span className="text-muted-foreground text-xs mt-1">
                   {new Date(order.createdAt).toLocaleDateString()}
                 </span>

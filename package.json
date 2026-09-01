@@ -1,12 +1,12 @@
 {
-  "name": "dockstack",
+  "name": "docstack",
   "version": "0.1.0",
   "private": true,
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "stripe:listen": "stripe listen --forward-to localhost:3000/api/webhooks/stripe",
+    "stripe:listen": "stripe listen --project-name docstack --forward-to localhost:3000/api/webhooks/stripe",
     "lint": "eslint"
   },
   "dependencies": {

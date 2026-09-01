@@ -4,7 +4,7 @@ import { useState } from "react";
 import { signIn } from "next-auth/react";
 import { Loader2 } from "lucide-react";
 
-export function LoginButton() {
+export function LoginButton({ callbackUrl = "/dashboard" }: { callbackUrl?: string }) {
   const [isLoading, setIsLoading] = useState(false);
 
   const handleLogin = async () => {
@@ -13,7 +13,7 @@ export function LoginButton() {
       setIsLoading(true);
 
       // Trigger NextAuth Google login
-      await signIn("google", { callbackUrl: "/dashboard" });
+      await signIn("google", { callbackUrl });
     } catch (error) {
       console.error("❌ Sign in error:", error);
       setIsLoading(false);

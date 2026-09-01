@@ -1,5 +1,6 @@
 // src/app/product/[slug]/page.tsx
 import Image from "next/image";
+import Link from "next/link";
 import { notFound } from "next/navigation";
 import { adminDb } from "@/lib/firebase/admin";
 import { Product } from "@/lib/schemas";
@@ -7,7 +8,6 @@ import { Badge } from "@/components/ui/badge";
 import { CheckoutButton } from "@/components/checkout-button";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
-import { GoogleSignInButton } from "@/components/google-signin-button";
 import { siteConfig } from "@/config/siteConfig";
 
 // 1. Generate Dynamic SEO Metadata for sharing links
@@ -53,9 +53,9 @@ export default async function ProductPage({ params }: { params: Promise<{ slug: 
       <div className="mx-auto max-w-6xl px-6 md:px-8">
         {/* Breadcrumb / Back Navigation */}
         <div className="mb-8">
-          <a href="/" className="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors">
+          <Link href="/" className="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors">
             ← Back to templates
-          </a>
+          </Link>
         </div>
 
         <div className="grid grid-cols-1 gap-12 lg:grid-cols-2 lg:gap-16">
@@ -111,24 +111,24 @@ export default async function ProductPage({ params }: { params: Promise<{ slug: 
             <p className="text-lg leading-relaxed text-muted-foreground mb-8 text-pretty">{product.description}</p>
 
             <div className="mt-auto border-t border-border/50 pt-8">
-              {session ? (
-                <div className="space-y-4">
-                  <div className="flex items-center justify-between text-sm text-muted-foreground mb-4">
-                    <span>Instant digital download</span>
-                    <span>Secure Stripe checkout</span>
-                  </div>
-                  <CheckoutButton productId={product.id as string} priceInCents={product.price} />
+              <div className="space-y-4">
+                <div className="flex items-center justify-between text-sm text-muted-foreground mb-4">
+                  <span>Instant digital download</span>
+                  <span>Secure Stripe checkout</span>
+                </div>
+                <CheckoutButton productId={product.id as string} priceInCents={product.price} />
+                {session ? (
                   <p className="text-center text-xs text-muted-foreground mt-4">Logged in as {session.user?.email}</p>
-                </div>
-              ) : (
-                <div className="space-y-4 rounded-xl border border-border/50 bg-muted/20 p-6 text-center">
-                  <h3 className="font-medium text-foreground">Sign in to purchase</h3>
-                  <p className="text-sm text-muted-foreground mb-4">
-                    Create a free account to access your downloads forever.
+                ) : (
+                  <p className="text-center text-xs text-muted-foreground mt-4">
+                    Checkout as a guest, or{" "}
+                    <Link href="/login" className="font-medium text-foreground underline underline-offset-4">
+                      sign in to keep purchases in My Templates
+                    </Link>
+                    .
                   </p>
-                  <GoogleSignInButton />
-                </div>
-              )}
+                )}
+              </div>
             </div>
           </div>
         </div>

@@ -7,6 +7,7 @@ interface ReceiptEmailProps {
 }
 
 export function ReceiptEmail({ order }: Readonly<ReceiptEmailProps>) {
+  const hasAccountHistory = typeof order.userId === "string" && order.checkoutMode !== "guest";
   const formattedTotal = new Intl.NumberFormat("en-US", {
     style: "currency",
     currency: "USD"
@@ -91,10 +92,17 @@ export function ReceiptEmail({ order }: Readonly<ReceiptEmailProps>) {
             textAlign: "center"
           }}>
           <p style={{ margin: 0 }}>
-            You can also access your files anytime by logging into your account at{" "}
-            <a href="https://yourdomain.com/dashboard" style={{ color: "#09090b", textDecoration: "underline" }}>
-              yourdomain.com/dashboard
-            </a>
+            {hasAccountHistory ? (
+              <>
+                You can also access your files anytime from your{" "}
+                <a href={`${siteConfig.url}/dashboard`} style={{ color: "#09090b", textDecoration: "underline" }}>
+                  My Templates account history
+                </a>
+                .
+              </>
+            ) : (
+              "Keep this email for future access to your download links. Guest purchases are not added to an account automatically."
+            )}
           </p>
         </div>
       </div>

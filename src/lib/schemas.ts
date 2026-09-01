@@ -77,11 +77,48 @@ export type OrderItem = z.infer<typeof orderItemSchema>;
 
 export const orderSchema = z.object({
   id: z.string(),
-  userId: z.string(),
-  customerEmail: z.string().email(),
+  userId: z.string().nullable(),
+  checkoutMode: z.enum(["authenticated", "guest"]).optional(),
+  accountEmail: z.string().email().optional(),
+  checkoutEmail: z.string().email().optional(),
+  deliveryEmail: z.string().email().optional(),
+  customerEmail: z.string().email().optional(),
 
   // Stripe references
   stripeSessionId: z.string(),
+  stripePaymentIntentId: z.string().optional(),
+  stripePaymentStatus: z.enum(["unpaid", "paid", "no_payment_required"]).optional(),
+  checkoutAttemptId: z.string().optional(),
+  checkoutProductId: z.string().optional(),
+  stripeCheckoutIdempotencyKey: z.string().optional(),
+  stripeCheckoutFirstAttemptAt: z.number().optional(),
+  checkoutStatus: z
+    .enum([
+      "creating_session",
+      "session_creation_indeterminate",
+      "session_creation_manual_review",
+      "session_created",
+      "payment_failed",
+      "session_expired",
+      "product_unavailable",
+      "session_creation_failed"
+    ])
+    .optional(),
+  checkoutFailureReason: z.string().optional(),
+  stripeCheckoutSnapshot: z
+    .object({
+      customerEmail: z.string().email().optional(),
+      currency: z.string(),
+      productName: z.string(),
+      productDescription: z.string(),
+      productImage: z.string(),
+      unitAmount: z.number().int().nonnegative(),
+      successUrl: z.string().url(),
+      cancelUrl: z.string().url()
+    })
+    .optional(),
+  lastProcessedStripeEventId: z.string().optional(),
+  lastProcessedStripeEventType: z.string().optional(),
   amountTotal: z.number(),
 
   items: z.array(orderItemSchema),
@@ -89,8 +126,20 @@ export const orderSchema = z.object({
   // Fulfillment tracking
   status: z.enum(["pending", "paid", "failed"]),
   deliveryEmailSent: z.boolean().default(false),
+  deliveryEmailStatus: z.enum(["pending", "sending", "sent", "failed", "manual_review"]).optional(),
+  deliveryEmailAttempts: z.number().int().nonnegative().optional(),
+  deliveryEmailClaimId: z.string().optional(),
+  deliveryEmailClaimedAt: z.number().optional(),
+  deliveryEmailFirstAttemptAt: z.number().optional(),
+  deliveryEmailNextAttemptAt: z.number().optional(),
+  deliveryEmailIdempotencyKey: z.string().optional(),
+  deliveryEmailSentAt: z.number().optional(),
+  deliveryEmailProviderId: z.string().optional(),
+  deliveryEmailError: z.string().optional(),
+  deliveryEmailManualReviewReason: z.string().optional(),
 
-  createdAt: z.number()
+  createdAt: z.number(),
+  updatedAt: z.number().optional()
 });
 
 export type Order = z.infer<typeof orderSchema>;
