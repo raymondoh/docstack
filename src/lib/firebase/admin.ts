@@ -103,6 +103,7 @@ export function getFirebaseAdmin() {
   const credentials = getFirebaseAdminCredentials();
 
   return admin.initializeApp({
+    projectId: credentials.projectId,
     credential: admin.credential.cert({
       projectId: credentials.projectId,
       clientEmail: credentials.clientEmail,

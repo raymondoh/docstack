@@ -1,52 +1,34 @@
 import { NextAuthOptions } from "next-auth";
 
-import CredentialsProvider from "next-auth/providers/credentials";
-import { adminAuth } from "@/lib/firebase/admin";
 import GoogleProvider from "next-auth/providers/google";
 import { env } from "@/lib/env";
+import { authAdapter, ensurePersistentGoogleIdentity } from "@/lib/auth/firestore-identity";
+import { AUTH_SESSION_STRATEGY, exposePersistentUserId, persistUserIdInJwt } from "@/lib/auth/session-identity";
 
 export const authOptions: NextAuthOptions = {
+  adapter: authAdapter,
   providers: [
     GoogleProvider({
       clientId: env.GOOGLE_CLIENT_ID,
       clientSecret: env.GOOGLE_CLIENT_SECRET
-    }),
-    CredentialsProvider({
-      id: "credentials",
-      name: "Firebase",
-      credentials: {
-        idToken: { label: "ID Token", type: "text" }
-      },
-      async authorize(credentials) {
-        if (!credentials?.idToken) {
-          return null;
-        }
-
-        try {
-          // 1. Verify the Firebase token securely on the server
-          // FIX: Use the imported adminAuth constant directly. Do not invoke it as a function.
-          const decodedToken = await adminAuth.verifyIdToken(credentials.idToken);
-
-          // 2. Return the user object to NextAuth
-          return {
-            id: decodedToken.uid,
-            email: decodedToken.email,
-            name: decodedToken.name || decodedToken.email?.split("@")[0] || "User",
-            image: decodedToken.picture,
-            role: decodedToken.role || "user" // Default to 'user'
-          };
-        } catch (error) {
-          console.error("❌ Firebase ID Token verification failed:", error);
-          return null;
-        }
-      }
     })
   ],
   callbacks: {
+    async signIn({ account, profile }) {
+      if (account?.provider !== "google") return true;
+
+      try {
+        await ensurePersistentGoogleIdentity(account, profile);
+        return true;
+      } catch (error) {
+        console.error("Persistent Google identity bootstrap failed:", error);
+        return false;
+      }
+    },
     async jwt({ token, user }) {
       // On initial sign in, attach the user data to the token
       if (user) {
-        token.uid = user.id;
+        persistUserIdInJwt(token, user);
         token.email = user.email;
         token.role = user.role;
       }
@@ -55,7 +37,7 @@ export const authOptions: NextAuthOptions = {
     async session({ session, token }) {
       // Pass the token data into the browser session object
       if (session.user) {
-        session.user.id = token.uid as string;
+        exposePersistentUserId(session, token);
         session.user.role = token.role as string;
       }
       return session;
@@ -65,7 +47,7 @@ export const authOptions: NextAuthOptions = {
     signIn: "/login" // Custom login page route
   },
   session: {
-    strategy: "jwt",
+    strategy: AUTH_SESSION_STRATEGY,
     maxAge: 30 * 24 * 60 * 60 // 30 days
   },
   secret: env.NEXTAUTH_SECRET

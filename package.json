@@ -6,10 +6,15 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
+    "test": "node --import tsx --test src/lib/auth/auth-options.test.ts src/lib/auth/google-identity.test.ts src/lib/auth/session-identity.test.ts",
+    "auth:inventory": "tsx scripts/auth-inventory.ts",
     "stripe:listen": "stripe listen --project-name docstack --forward-to localhost:3000/api/webhooks/stripe",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test:auth:integration": "node --import tsx --test src/lib/auth/firestore-identity.integration.test.ts",
+    "test:auth:emulator": "npx --yes firebase-tools emulators:exec --config firebase.auth-emulator.json --project demo-docstack-auth --only firestore \"npm run test:auth:integration\""
   },
   "dependencies": {
+    "@auth/firebase-adapter": "2.11.3",
     "@react-email/components": "^1.0.10",
     "@react-email/render": "^2.0.4",
     "@t3-oss/env-nextjs": "^0.13.10",
@@ -19,7 +24,7 @@
     "firebase-admin": "^13.7.0",
     "lucide-react": "^0.577.0",
     "next": "16.1.6",
-    "next-auth": "^4.24.13",
+    "next-auth": "4.24.15",
     "next-themes": "^0.4.6",
     "radix-ui": "^1.4.3",
     "react": "19.2.3",
@@ -39,6 +44,7 @@
     "eslint": "^9",
     "eslint-config-next": "16.1.6",
     "tailwindcss": "^4",
+    "tsx": "4.20.5",
     "typescript": "^5"
   }
 }

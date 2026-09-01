@@ -39,6 +39,8 @@ next-env.d.ts
 !package-lock.json
 !tsconfig.json
 !components.json
+!firebase.auth-emulator.json
+!src/lib/auth/package.json
 
 # --- Platforms & Tools ---
 .vercel/
