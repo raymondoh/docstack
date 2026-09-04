@@ -11,6 +11,7 @@ import { inspectIdentityKeys } from "./identity-inventory";
 import { createFirestoreIdentityStore } from "./firestore-identity-store";
 import { googleAccountDocumentId } from "./google-identity";
 import { exposePersistentUserId, persistUserIdInJwt } from "./session-identity";
+import { verificationTokenDocumentId, VerificationTokenIntegrityError } from "./verification-tokens";
 
 const emulatorHost = process.env.FIRESTORE_EMULATOR_HOST;
 const skipReason = emulatorHost
@@ -56,12 +57,96 @@ describe("Firestore-backed persistent Google identity", { skip: skipReason }, ()
       clearCollection(firestore, AUTH_COLLECTIONS.accounts),
       clearCollection(firestore, AUTH_COLLECTIONS.users),
       clearCollection(firestore, AUTH_COLLECTIONS.sessions),
+      clearCollection(firestore, AUTH_COLLECTIONS.verificationTokens),
       clearCollection(firestore, AUTH_IDENTITY_KEYS)
     ]);
   });
 
   after(async () => {
     if (app) await deleteApp(app);
+  });
+
+  const tokenInput = { identifier: "buyer@example.com", token: "a".repeat(64), expires: new Date("2030-01-01") };
+
+  it("creates and atomically consumes one token, returning Date shape; sequential replay is null", async () => {
+    const created = await identityStore.authAdapter.createVerificationToken(tokenInput);
+    assert.deepEqual(created, tokenInput);
+    const ref = firestore.collection(AUTH_COLLECTIONS.verificationTokens)
+      .doc(verificationTokenDocumentId(tokenInput.identifier, tokenInput.token));
+    const stored = (await ref.get()).data()!;
+    assert.deepEqual(Object.keys(stored).sort(), ["expires", "identifier", "token"]);
+    assert.equal(stored.token, tokenInput.token);
+    assert.equal(stored.expires.toDate().getTime(), tokenInput.expires.getTime());
+    assert.deepEqual(await identityStore.authAdapter.useVerificationToken(tokenInput), tokenInput);
+    assert.equal((await ref.get()).exists, false);
+    assert.equal(await identityStore.authAdapter.useVerificationToken(tokenInput), null);
+  });
+
+  it("two genuine concurrent consumers return exactly one token and one null", async () => {
+    await identityStore.authAdapter.createVerificationToken(tokenInput);
+    const results = await Promise.all([
+      identityStore.authAdapter.useVerificationToken(tokenInput),
+      identityStore.authAdapter.useVerificationToken(tokenInput)
+    ]);
+    assert.equal(results.filter(value => value !== null).length, 1);
+    assert.equal(results.filter(value => value === null).length, 1);
+    assert.equal((await firestore.collection(AUTH_COLLECTIONS.verificationTokens).get()).size, 0);
+  });
+
+  it("canonical forms share a locator; different tokens remain independently consumable", async () => {
+    await identityStore.authAdapter.createVerificationToken({ ...tokenInput, identifier: " ＢＵＹＥＲ@example.com " });
+    const second = { ...tokenInput, token: "b".repeat(64) };
+    await identityStore.authAdapter.createVerificationToken(second);
+    assert.deepEqual(await identityStore.authAdapter.useVerificationToken({ ...tokenInput, identifier: "BUYER@example.com" }), tokenInput);
+    assert.equal((await firestore.collection(AUTH_COLLECTIONS.verificationTokens).get()).size, 1);
+    assert.deepEqual(await identityStore.authAdapter.useVerificationToken(second), second);
+  });
+
+  it("wrong token/identifier do not consume a valid link, and malformed input fails", async () => {
+    await identityStore.authAdapter.createVerificationToken(tokenInput);
+    assert.equal(await identityStore.authAdapter.useVerificationToken({ ...tokenInput, token: "c".repeat(64) }), null);
+    assert.equal(await identityStore.authAdapter.useVerificationToken({ ...tokenInput, identifier: "other@example.com" }), null);
+    await assert.rejects(identityStore.authAdapter.useVerificationToken({ ...tokenInput, identifier: "a@@example.com" }), VerificationTokenIntegrityError);
+    await assert.rejects(identityStore.authAdapter.createVerificationToken({ ...tokenInput, identifier: "a@@example.com" }), VerificationTokenIntegrityError);
+    assert.deepEqual(await identityStore.authAdapter.useVerificationToken(tokenInput), tokenInput);
+  });
+
+  it("expired tokens are consumed once and returned expired for NextAuth v4 to reject", async () => {
+    const expired = { ...tokenInput, expires: new Date(0) };
+    await identityStore.authAdapter.createVerificationToken(expired);
+    const consumed = await identityStore.authAdapter.useVerificationToken(expired);
+    assert.deepEqual(consumed, expired);
+    assert.ok(consumed!.expires.valueOf() < Date.now()); // Installed callback.js invalidInvite check.
+    assert.equal(await identityStore.authAdapter.useVerificationToken(expired), null);
+  });
+
+  it("duplicate creation cannot overwrite or extend a token, including concurrent creation", async () => {
+    const results = await Promise.allSettled([
+      identityStore.authAdapter.createVerificationToken(tokenInput),
+      identityStore.authAdapter.createVerificationToken(tokenInput)
+    ]);
+    assert.equal(results.filter(value => value.status === "fulfilled").length, 1);
+    assert.equal(results.filter(value => value.status === "rejected").length, 1);
+    await assert.rejects(identityStore.authAdapter.createVerificationToken({ ...tokenInput, expires: new Date("2031-01-01") }), VerificationTokenIntegrityError);
+    assert.deepEqual(await identityStore.authAdapter.useVerificationToken(tokenInput), tokenInput);
+  });
+
+  it("corrupt deterministic records fail closed and remain unchanged for investigation", async () => {
+    const ref = firestore.collection(AUTH_COLLECTIONS.verificationTokens)
+      .doc(verificationTokenDocumentId(tokenInput.identifier, tokenInput.token));
+    for (const corrupt of [
+      { ...tokenInput, identifier: "other@example.com" },
+      { ...tokenInput, identifier: "BUYER@example.com" },
+      { ...tokenInput, token: "b".repeat(64) },
+      { ...tokenInput, expires: "invalid" },
+      { ...tokenInput, userId: "unexpected" },
+      { identifier: tokenInput.identifier, token: tokenInput.token }
+    ]) {
+      await ref.set(corrupt);
+      const before = (await ref.get()).data();
+      await assert.rejects(identityStore.authAdapter.useVerificationToken(tokenInput), VerificationTokenIntegrityError);
+      assert.deepEqual((await ref.get()).data(), before);
+    }
   });
 
   it("bootstraps the Google sub and resolves it through the adapter into JWT/session identity", async () => {

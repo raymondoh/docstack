@@ -6,7 +6,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "test": "node --import tsx --test src/lib/auth/auth-options.test.ts src/lib/auth/google-identity.test.ts src/lib/auth/session-identity.test.ts src/lib/auth/identity-email.test.ts",
+    "test": "node --import tsx --test src/lib/auth/auth-options.test.ts src/lib/auth/google-identity.test.ts src/lib/auth/session-identity.test.ts src/lib/auth/identity-email.test.ts src/lib/auth/verification-tokens.test.ts",
     "auth:inventory": "NODE_ENV=development node --env-file=.env.development.local --import tsx scripts/auth-inventory.ts",
     "auth:seed-identity-keys": "NODE_ENV=development node --env-file=.env.development.local --import tsx scripts/auth-seed-identity-keys.ts",
     "stripe:listen": "stripe listen --project-name docstack --forward-to localhost:3000/api/webhooks/stripe",

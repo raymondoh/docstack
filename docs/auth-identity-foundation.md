@@ -20,7 +20,19 @@ Adapter lookup is read-only and cannot reserve an address. Its controlled legacy
 
 Existing user IDs, Google account mappings, JWTs, order ownership and guest `userId: null` remain unchanged. `createUser` is an internal future adapter callback, not a public initiation endpoint; future email authentication must invoke it only after verification. Non-email profile updates remain possible, and verified callbacks may advance `emailVerified` without changing ownership. Ordinary updates cannot clear existing verification or move email ownership.
 
-The stock verification-token methods remain untouched. Its non-atomic `useVerificationToken` must be replaced and tested in **Phase 2A.2b before registering an Email provider**. Do not interpret this foundation as safe magic-link authentication on its own.
+## Phase 2A.2b: atomic verification tokens (Email remains disabled)
+
+The guarded adapter overrides both token methods. `verificationTokens/verification-v1_<digest>` uses SHA-256 of `docstack:verification-token:v1\0` + canonical identifier + `\0` + the already-hashed NextAuth token (separators are NUL bytes). The record contains only canonical `identifier`, NextAuth-hashed `token`, and Firestore Timestamp `expires`. This second hash is only a storage locator; no raw emailed token or new secret is stored.
+
+Creation uses an exact-document transaction and rejects all duplicate creation, including identical duplicates, without changing expiry. Different tokens for one email coexist. Consumption reads, validates and deletes the exact document in one Firestore transaction; concurrent consumers yield at most one token, with subsequent consumers receiving null. No query/legacy fallback exists. Corrupt records throw a non-sensitive integrity error and remain untouched for investigation; they never authenticate.
+
+Installed NextAuth **4.24.15** source was inspected: `node_modules/next-auth/core/lib/email/signin.js` generates the raw token (default `randomBytes(32).toString("hex")`), sends it in the email URL, and passes `{ identifier, token: hashToken(raw, options), expires: Date }` to `createVerificationToken`. `core/lib/utils.js` hashes SHA-256 of the raw token concatenated with `provider.secret ?? options.secret`. `core/routes/callback.js` hashes the URL token the same way before `useVerificationToken({ identifier, token })`. It rejects a null result, an expiry earlier than `Date.now()`, or an identifier mismatch before loading/authenticating a User. Missing URL tokens take the configuration-error path. The adapter returns a Date and deliberately consumes expired tokens once for NextAuth to reject. TTL is never an authentication check.
+
+The installed callback compares the returned identifier to the URL email literally. Canonical forms resolve identically in storage, but a manually changed/noncanonical callback email can still be rejected by NextAuth after consumption. A future Email provider must use the same canonical normalizer at initiation so generated links carry canonical identifiers; do not weaken callback validation.
+
+The supplied production inventory for this phase reports zero verification tokens and email auth has never been enabled, so no token migration or legacy-format support is needed. This pass does not access production. Google remains the only provider: no Email provider, email UI, auth email delivery, or token endpoint is enabled here.
+
+Later Firebase Console setup: Firestore Database → Time-to-live policies → Create policy; collection group **verificationTokens**, timestamp field **expires**, enable TTL. Verify server-only Firestore Rules before rollout. TTL asynchronously cleans unused expired links; NextAuth still enforces expiry immediately. Do not make this production change as part of this code pass. **Never enable TTL on authIdentityKeys.** No new collection, composite index, dependency or environment secret is required.
 
 ## Production inventory
 

@@ -7,6 +7,7 @@ import { AUTH_COLLECTIONS } from "./collections";
 import { googleAccountDocumentId, googleAccountRecord, parseAuthoritativeGoogleIdentity, planGoogleIdentityBootstrap } from "./google-identity";
 import { assertEstablishedEmail, IdentityConflictError, normalizeIdentityEmail } from "./identity-email";
 import { adapterUser, identityKeyRecord, readEmailIdentity } from "./identity-records";
+import { createVerificationTokenStore } from "./verification-tokens";
 
 export function createFirestoreIdentityStore(firestore: Firestore) {
   // The adapter has newer @auth/core types, but its runtime/schema contract is
@@ -176,7 +177,7 @@ export function createFirestoreIdentityStore(firestore: Firestore) {
   }
 
   return {
-    authAdapter: { ...baseAdapter, getUser, getUserByAccount, getSessionAndUser, getUserByEmail, createUser, updateUser } satisfies Adapter,
+    authAdapter: { ...baseAdapter, ...createVerificationTokenStore(firestore), getUser, getUserByAccount, getSessionAndUser, getUserByEmail, createUser, updateUser } satisfies Adapter,
     ensurePersistentGoogleIdentity: ensureGoogleIdentity,
     seedIdentityKey
   };
