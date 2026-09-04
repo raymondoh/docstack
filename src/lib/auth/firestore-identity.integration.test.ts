@@ -12,6 +12,15 @@ import { createFirestoreIdentityStore } from "./firestore-identity-store";
 import { googleAccountDocumentId } from "./google-identity";
 import { exposePersistentUserId, persistUserIdInJwt } from "./session-identity";
 import { verificationTokenDocumentId, VerificationTokenIntegrityError } from "./verification-tokens";
+import { createHash } from "node:crypto";
+import { createRequire } from "node:module";
+import { AUTH_RATE_LIMITS, createEmailRateLimiter, rateLimitIds } from "./email-rate-limit";
+import { emailProviders } from "./email-provider";
+import { emailRequestOptions, isUnsupportedEmailInitiation } from "./email-request";
+import type { NextAuthOptions } from "next-auth";
+
+// Actual installed v4 core handler, not a mocked NextAuth flow.
+const { AuthHandler } = createRequire(import.meta.url)("../../../node_modules/next-auth/core/index.js");
 
 const emulatorHost = process.env.FIRESTORE_EMULATOR_HOST;
 const skipReason = emulatorHost
@@ -58,6 +67,7 @@ describe("Firestore-backed persistent Google identity", { skip: skipReason }, ()
       clearCollection(firestore, AUTH_COLLECTIONS.users),
       clearCollection(firestore, AUTH_COLLECTIONS.sessions),
       clearCollection(firestore, AUTH_COLLECTIONS.verificationTokens),
+      clearCollection(firestore, AUTH_RATE_LIMITS),
       clearCollection(firestore, AUTH_IDENTITY_KEYS)
     ]);
   });
@@ -67,6 +77,197 @@ describe("Firestore-backed persistent Google identity", { skip: skipReason }, ()
   });
 
   const tokenInput = { identifier: "buyer@example.com", token: "a".repeat(64), expires: new Date("2030-01-01") };
+
+  const rateSecret = "synthetic-rate-limit-secret-for-emulator";
+  const startTime = Date.parse("2030-01-01");
+
+  it("rolling email minute/hour limits canonicalize inputs and expire independently of TTL", async () => {
+    let now = startTime;
+    const allow = createEmailRateLimiter(firestore, rateSecret, () => now);
+    assert.equal(await allow("Buyer@example.com", "192.0.2.1"), true);
+    assert.equal(await allow(" ＢＵＹＥＲ@example.com ", "192.0.2.2"), false);
+    for (let i = 1; i < 5; i++) { now += 60_000; assert.equal(await allow("buyer@example.com", "192.0.2.1"), true); }
+    now += 60_000;
+    assert.equal(await allow("buyer@example.com", "192.0.2.1"), false);
+    assert.equal(await allow("different@example.com", "192.0.2.1"), true);
+    now = startTime + 3_600_000;
+    assert.equal(await allow("buyer@example.com", "192.0.2.1"), true);
+    const docs = await firestore.collection(AUTH_RATE_LIMITS).get();
+    for (const doc of docs.docs) {
+      assert.deepEqual(Object.keys(doc.data()).sort(), ["cleanupAt", "requests", "updatedAt"]);
+      assert.ok(!doc.id.includes("@") && !doc.id.includes("192.0.2"));
+    }
+  });
+
+  it("per-IP twentieth request succeeds and twenty-first is blocked", async () => {
+    const allow = createEmailRateLimiter(firestore, rateSecret, () => startTime);
+    for (let i = 0; i < 20; i++) assert.equal(await allow(`person${i}@example.com`, "192.0.2.1"), true);
+    assert.equal(await allow("another@example.com", "192.0.2.1"), false);
+    assert.equal(await allow("another@example.com", "192.0.2.2"), true);
+  });
+
+  it("global hundredth request succeeds and hundred-and-first is blocked", async () => {
+    const allow = createEmailRateLimiter(firestore, rateSecret, () => startTime);
+    for (let i = 0; i < 100; i++) assert.equal(await allow(`person${i}@example.com`, `192.0.2.${i + 1}`), true);
+    assert.equal(await allow("another@example.com", "192.0.2.200"), false);
+  });
+
+  it("two concurrent requests at IP count 19 admit exactly one and commit 20", async () => {
+    const allow = createEmailRateLimiter(firestore, rateSecret, () => startTime);
+    for (let i = 0; i < 19; i++) assert.equal(await allow(`person${i}@example.com`, "192.0.2.1"), true);
+    const results = await Promise.all([allow("boundary-a@example.com", "192.0.2.1"), allow("boundary-b@example.com", "192.0.2.1")]);
+    assert.deepEqual(results.slice().sort(), [false, true]);
+    const ids = rateLimitIds("boundary-a@example.com", "192.0.2.1", rateSecret);
+    assert.equal((await firestore.collection(AUTH_RATE_LIMITS).doc(ids[1]).get()).data()?.requests.length, 20);
+    assert.equal((await firestore.collection(AUTH_RATE_LIMITS).doc(ids[2]).get()).data()?.requests.length, 20);
+  });
+
+  it("two concurrent requests at global count 99 admit exactly one and commit 100", async () => {
+    const allow = createEmailRateLimiter(firestore, rateSecret, () => startTime);
+    for (let i = 0; i < 99; i++) assert.equal(await allow(`person${i}@example.com`, `192.0.2.${i + 1}`), true);
+    const results = await Promise.all([allow("boundary-a@example.com", "192.0.2.200"), allow("boundary-b@example.com", "192.0.2.201")]);
+    assert.deepEqual(results.slice().sort(), [false, true]);
+    assert.equal((await firestore.collection(AUTH_RATE_LIMITS).doc("global-v1").get()).data()?.requests.length, 100);
+    for (const [i, email] of ["boundary-a@example.com", "boundary-b@example.com"].entries()) {
+      const ids = rateLimitIds(email, `192.0.2.${200 + i}`, rateSecret);
+      assert.equal((await firestore.collection(AUTH_RATE_LIMITS).doc(ids[0]).get()).exists, results[i]);
+      assert.equal((await firestore.collection(AUTH_RATE_LIMITS).doc(ids[1]).get()).exists, results[i]);
+    }
+  });
+
+  it("concurrent requests cannot exceed limits or double-count transaction retries", async () => {
+    const allow = createEmailRateLimiter(firestore, rateSecret, () => startTime);
+    const results = await Promise.all(Array.from({ length: 6 }, () => allow("buyer@example.com", "192.0.2.1")));
+    assert.equal(results.filter(Boolean).length, 1);
+    for (const id of rateLimitIds("buyer@example.com", "192.0.2.1", rateSecret)) {
+      assert.deepEqual((await firestore.collection(AUTH_RATE_LIMITS).doc(id).get()).data()?.requests, [startTime]);
+    }
+  });
+
+  it("malformed emails create no counters and corrupt operational state fails closed", async () => {
+    const allow = createEmailRateLimiter(firestore, rateSecret, () => startTime);
+    await assert.rejects(allow("a@@example.com", "192.0.2.1"));
+    assert.equal((await firestore.collection(AUTH_RATE_LIMITS).get()).size, 0);
+    await firestore.collection(AUTH_RATE_LIMITS).doc("global-v1").set({ requests: "corrupt" });
+    await assert.rejects(allow("buyer@example.com", "192.0.2.1"));
+    assert.equal((await firestore.collection(AUTH_RATE_LIMITS).get()).size, 1);
+  });
+
+  it("direct email POST uses real v4 CSRF/initiation and cannot bypass throttling or query accounts", async () => {
+    const secret = "synthetic-nextauth-test-secret";
+    const csrf = "synthetic-csrf";
+    const cookie = csrf + "|" + createHash("sha256").update(csrf + secret).digest("hex");
+    let sends = 0;
+    let sentUrl = "";
+    const providerSettings = { enabled: true, from: "signin@example.com", apiKey: "re_synthetic", authUrl: "https://example.com" };
+    const base: NextAuthOptions = {
+      secret, useSecureCookies: false, session: { strategy: "jwt" },
+      providers: emailProviders(providerSettings, async mail => {
+        sends++;
+        sentUrl = mail.react.props.url;
+        return { data: { id: "synthetic" } };
+      }),
+      adapter: { ...identityStore.authAdapter,
+        getUserByEmail: async () => { throw new Error("Initiation must not query identities"); },
+        createUser: async () => { throw new Error("Initiation must not create identities"); }
+      },
+      logger: { error() {}, warn() {}, debug() {} },
+      callbacks: { signIn: async ({ email }) => !email?.verificationRequest }
+    };
+    const allow = createEmailRateLimiter(firestore, rateSecret, () => startTime);
+    async function post(options: NextAuthOptions, limiter = allow, validCsrf = true, segments = ["signin", "email"]) {
+      const request = new Request("https://example.com/api/auth/signin/email", {
+        method: "POST", headers: { "content-type": "application/json", cookie: `next-auth.csrf-token=${encodeURIComponent(cookie)}`, "x-vercel-forwarded-for": "192.0.2.1" },
+        body: JSON.stringify({ email: " ＢＵＹＥＲ@example.com ", csrfToken: validCsrf ? csrf : "wrong", callbackUrl: "https://evil.example/" })
+      });
+      // Same early route guard as the exported App Router handler.
+      if (isUnsupportedEmailInitiation(segments)) return { status: 404, redirect: undefined };
+      const scoped = emailRequestOptions(options, request, segments, {
+        authUrl: providerSettings.authUrl, runtime: { vercel: "1" }, allow: limiter
+      });
+      // Feed the real direct HTTP request through the same request-local options
+      // used by route.ts and the installed core handler; pin trusted origin for test.
+      const previousAuthUrl = process.env.NEXTAUTH_URL;
+      process.env.NEXTAUTH_URL = providerSettings.authUrl; // v4 detects origin from server env.
+      try {
+        return await AuthHandler({ req: {
+          method: request.method, action: "signin", providerId: "email",
+          headers: Object.fromEntries(request.headers), body: await request.json(), query: {},
+          cookies: { "next-auth.csrf-token": cookie }
+        }, options: scoped });
+      } finally {
+        if (previousAuthUrl === undefined) delete process.env.NEXTAUTH_URL;
+        else process.env.NEXTAUTH_URL = previousAuthUrl;
+      }
+    }
+    for (const enabled of [true, false]) {
+      for (const segments of [["signin", "email", "extra"], ["signin", "email", "foo", "bar"]]) {
+        const result = await post({ ...base, providers: emailProviders({ ...providerSettings, enabled }) }, allow, true, segments);
+        assert.equal(result.status, 404);
+      }
+    }
+    assert.equal(sends, 0);
+    assert.equal((await firestore.collection(AUTH_COLLECTIONS.verificationTokens).get()).size, 0);
+    assert.equal((await firestore.collection(AUTH_RATE_LIMITS).get()).size, 0);
+    await post(base, allow, false);
+    assert.equal(sends, 0);
+    assert.equal((await firestore.collection(AUTH_RATE_LIMITS).get()).size, 0);
+    const first = await post(base);
+    assert.equal(sends, 1);
+    assert.equal(first.redirect, "https://example.com/api/auth/verify-request?provider=email&type=email");
+    assert.equal(new URL(sentUrl).searchParams.get("callbackUrl"), providerSettings.authUrl);
+    assert.equal((await firestore.collection(AUTH_COLLECTIONS.verificationTokens).get()).size, 1);
+    const blocked = await post(base);
+    assert.equal(blocked.redirect, first.redirect);
+    assert.equal(sends, 1);
+    assert.equal((await firestore.collection(AUTH_COLLECTIONS.verificationTokens).get()).size, 1);
+    assert.equal((await firestore.collection(AUTH_COLLECTIONS.users).get()).size, 0);
+    assert.equal((await firestore.collection(AUTH_COLLECTIONS.accounts).get()).size, 0);
+    // Inject rejection at the existing admission boundary (not a real network outage).
+    const failedStore = await post(base, async () => { throw new Error("Synthetic storage unavailable"); });
+    assert.equal(failedStore.redirect, first.redirect);
+    assert.equal(sends, 1);
+    assert.equal((await firestore.collection(AUTH_COLLECTIONS.verificationTokens).get()).size, 1);
+    // A real failing Firestore-backed transaction, without mocking the limiter.
+    await firestore.collection(AUTH_RATE_LIMITS).doc("global-v1").set({ requests: "unavailable-state" });
+    const unavailable = await post(base);
+    assert.equal(unavailable.redirect, first.redirect);
+    const googleOptions = emailRequestOptions(base, new Request("https://example.com/api/auth/signin/google", { method: "POST" }), ["signin", "google"], {
+      authUrl: providerSettings.authUrl, runtime: { vercel: "1" }, allow
+    });
+    assert.equal(await googleOptions.callbacks!.signIn!({ user: { id: subject }, account }), true);
+    assert.equal(sends, 1);
+    await post({ ...base, providers: emailProviders({ ...providerSettings, enabled: false }) });
+    assert.equal(sends, 1);
+    assert.equal((await firestore.collection(AUTH_COLLECTIONS.verificationTokens).get()).size, 1);
+
+    // Real verified callback must restore the guarded adapter, keep a historical
+    // Google-sub owner, advance emailVerified and expose that same UID to JWT.
+    await identityStore.ensurePersistentGoogleIdentity(account, profile);
+    let verifiedUid: unknown;
+    const callbackBase: NextAuthOptions = { ...base, adapter: identityStore.authAdapter, callbacks: {
+      ...base.callbacks,
+      jwt: async ({ token, user }) => { persistUserIdInJwt(token, user); verifiedUid = token.uid; return token; }
+    } };
+    const callbackRequest = new Request(sentUrl);
+    const callbackOptions = emailRequestOptions(callbackBase, callbackRequest, ["callback", "email"], {
+      authUrl: providerSettings.authUrl, runtime: { vercel: "1" }, allow: async () => { throw new Error("No initiation limiter on verified callbacks"); }
+    });
+    assert.equal(callbackOptions.adapter, identityStore.authAdapter);
+    const previousAuthUrl = process.env.NEXTAUTH_URL;
+    process.env.NEXTAUTH_URL = providerSettings.authUrl;
+    try {
+      const response = await AuthHandler({ req: { method: "GET", action: "callback", providerId: "email", headers: {}, cookies: {}, body: {}, query: Object.fromEntries(new URL(sentUrl).searchParams) }, options: callbackOptions });
+      assert.equal(response.redirect, providerSettings.authUrl);
+      assert.equal(verifiedUid, subject);
+      assert.ok((await identityStore.authAdapter.getUser(subject))?.emailVerified instanceof Date);
+      assert.equal((await firestore.collection(AUTH_COLLECTIONS.users).get()).size, 1);
+      assert.equal((await firestore.collection(AUTH_COLLECTIONS.verificationTokens).get()).size, 0);
+    } finally {
+      if (previousAuthUrl === undefined) delete process.env.NEXTAUTH_URL;
+      else process.env.NEXTAUTH_URL = previousAuthUrl;
+    }
+  });
 
   it("creates and atomically consumes one token, returning Date shape; sequential replay is null", async () => {
     const created = await identityStore.authAdapter.createVerificationToken(tokenInput);

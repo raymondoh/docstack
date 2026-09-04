@@ -1,5 +1,15 @@
 import { createEnv } from "@t3-oss/env-nextjs";
 import { z } from "zod";
+import { authEmailSettingsSchema } from "./auth/email-settings";
+
+// Enforce the cross-field invariant at server initialization, even when general
+// env validation is skipped. Never read server secrets in the browser.
+if (typeof window === "undefined") {
+  authEmailSettingsSchema.parse({
+    AUTH_EMAIL_ENABLED: process.env.AUTH_EMAIL_ENABLED,
+    AUTH_RATE_LIMIT_SECRET: process.env.AUTH_RATE_LIMIT_SECRET,
+  });
+}
 
 export const env = createEnv({
   server: {
@@ -7,6 +17,7 @@ export const env = createEnv({
     ADMIN_EMAIL: z.string().email(),
     NEXTAUTH_URL: z.string().url().default("http://localhost:3000"),
     NEXTAUTH_SECRET: z.string().min(1),
+    ...authEmailSettingsSchema.shape,
     GOOGLE_CLIENT_ID: z.string().min(1),
     GOOGLE_CLIENT_SECRET: z.string().min(1),
 

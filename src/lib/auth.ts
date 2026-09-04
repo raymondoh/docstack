@@ -4,9 +4,16 @@ import GoogleProvider from "next-auth/providers/google";
 import { env } from "@/lib/env";
 import { authAdapter, ensurePersistentGoogleIdentity } from "@/lib/auth/firestore-identity";
 import { AUTH_SESSION_STRATEGY, exposePersistentUserId, persistUserIdInJwt } from "@/lib/auth/session-identity";
+import { emailProviders } from "./auth/email-provider";
 
 export const authOptions: NextAuthOptions = {
   adapter: authAdapter,
+  // NextAuth adapter error metadata can include email/token arguments. Never log it.
+  logger: {
+    error() { console.error("AUTH_OPERATION_FAILED"); },
+    warn() { console.warn("AUTH_OPERATION_WARNING"); },
+    debug() {}
+  },
   providers: [
     GoogleProvider({
       clientId: env.GOOGLE_CLIENT_ID,
@@ -16,10 +23,13 @@ export const authOptions: NextAuthOptions = {
           prompt: "select_account"
         }
       }
-    })
+    }),
+    ...emailProviders({ enabled: env.AUTH_EMAIL_ENABLED === true, from: env.EMAIL_FROM, apiKey: env.RESEND_API_KEY, authUrl: env.NEXTAUTH_URL })
   ],
   callbacks: {
-    async signIn({ account, profile }) {
+    async signIn({ account, profile, email }) {
+      // Only the request-scoped, CSRF-validated initiation path can allow this.
+      if (email?.verificationRequest === true) return false;
       if (account?.provider !== "google") return true;
 
       try {
