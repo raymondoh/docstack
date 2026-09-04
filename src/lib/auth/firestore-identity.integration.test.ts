@@ -18,6 +18,7 @@ import { AUTH_RATE_LIMITS, createEmailRateLimiter, rateLimitIds } from "./email-
 import { emailProviders } from "./email-provider";
 import { emailRequestOptions, isUnsupportedEmailInitiation } from "./email-request";
 import type { NextAuthOptions } from "next-auth";
+import { CHECK_EMAIL_PATH, AUTH_ERROR_PATH } from "./login-policy";
 
 // Actual installed v4 core handler, not a mocked NextAuth flow.
 const { AuthHandler } = createRequire(import.meta.url)("../../../node_modules/next-auth/core/index.js");
@@ -68,6 +69,7 @@ describe("Firestore-backed persistent Google identity", { skip: skipReason }, ()
       clearCollection(firestore, AUTH_COLLECTIONS.sessions),
       clearCollection(firestore, AUTH_COLLECTIONS.verificationTokens),
       clearCollection(firestore, AUTH_RATE_LIMITS),
+      clearCollection(firestore, "orders"),
       clearCollection(firestore, AUTH_IDENTITY_KEYS)
     ]);
   });
@@ -153,7 +155,7 @@ describe("Firestore-backed persistent Google identity", { skip: skipReason }, ()
     assert.equal((await firestore.collection(AUTH_RATE_LIMITS).get()).size, 1);
   });
 
-  it("direct email POST uses real v4 CSRF/initiation and cannot bypass throttling or query accounts", async () => {
+  for (const existingGoogle of [true, false]) it(`direct email POST and verified callback preserve identity: ${existingGoogle ? "existing Google" : "new email"}`, async () => {
     const secret = "synthetic-nextauth-test-secret";
     const csrf = "synthetic-csrf";
     const cookie = csrf + "|" + createHash("sha256").update(csrf + secret).digest("hex");
@@ -162,6 +164,7 @@ describe("Firestore-backed persistent Google identity", { skip: skipReason }, ()
     const providerSettings = { enabled: true, from: "signin@example.com", apiKey: "re_synthetic", authUrl: "https://example.com" };
     const base: NextAuthOptions = {
       secret, useSecureCookies: false, session: { strategy: "jwt" },
+      pages: { verifyRequest: CHECK_EMAIL_PATH, error: AUTH_ERROR_PATH },
       providers: emailProviders(providerSettings, async mail => {
         sends++;
         sentUrl = mail.react.props.url;
@@ -243,7 +246,12 @@ describe("Firestore-backed persistent Google identity", { skip: skipReason }, ()
 
     // Real verified callback must restore the guarded adapter, keep a historical
     // Google-sub owner, advance emailVerified and expose that same UID to JWT.
-    await identityStore.ensurePersistentGoogleIdentity(account, profile);
+    const guestOrder = { checkoutMode: "guest", userId: null, deliveryEmail: "buyer@example.com", status: "paid" };
+    await firestore.collection("orders").doc("guest-fixture").set(guestOrder);
+    if (existingGoogle) {
+      await identityStore.ensurePersistentGoogleIdentity(account, profile);
+      await firestore.collection("orders").doc("historical-fixture").set({ userId: subject, status: "paid" });
+    }
     let verifiedUid: unknown;
     const callbackBase: NextAuthOptions = { ...base, adapter: identityStore.authAdapter, callbacks: {
       ...base.callbacks,
@@ -259,10 +267,25 @@ describe("Firestore-backed persistent Google identity", { skip: skipReason }, ()
     try {
       const response = await AuthHandler({ req: { method: "GET", action: "callback", providerId: "email", headers: {}, cookies: {}, body: {}, query: Object.fromEntries(new URL(sentUrl).searchParams) }, options: callbackOptions });
       assert.equal(response.redirect, providerSettings.authUrl);
-      assert.equal(verifiedUid, subject);
-      assert.ok((await identityStore.authAdapter.getUser(subject))?.emailVerified instanceof Date);
+      assert.equal(typeof verifiedUid, "string");
+      if (existingGoogle) {
+        assert.equal(verifiedUid, subject);
+        assert.equal((await firestore.collection("orders").doc("historical-fixture").get()).data()?.userId, verifiedUid);
+      } else {
+        assert.match(verifiedUid as string, /^[0-9a-f-]{36}$/u);
+        assert.equal((await firestore.collection(AUTH_COLLECTIONS.accounts).get()).size, 0);
+      }
+      const verifiedUser = await identityStore.authAdapter.getUser(verifiedUid as string);
+      assert.ok(verifiedUser?.emailVerified instanceof Date);
+      assert.equal((await firestore.collection(AUTH_IDENTITY_KEYS).doc(emailIdentityKeyId("buyer@example.com")).get()).data()?.userId, verifiedUid);
+      const session = { user: {}, expires: "2030-01-01" } as Session;
+      exposePersistentUserId(session, { uid: verifiedUid } as JWT);
+      assert.equal(session.user.id, verifiedUid);
+      assert.deepEqual((await firestore.collection("orders").doc("guest-fixture").get()).data(), guestOrder);
       assert.equal((await firestore.collection(AUTH_COLLECTIONS.users).get()).size, 1);
       assert.equal((await firestore.collection(AUTH_COLLECTIONS.verificationTokens).get()).size, 0);
+      const checkEmail = await AuthHandler({ req: { method: "GET", action: "verify-request", headers: {}, cookies: {}, query: { provider: "email", type: "email" } }, options: callbackOptions });
+      assert.equal(checkEmail.redirect, CHECK_EMAIL_PATH);
     } finally {
       if (previousAuthUrl === undefined) delete process.env.NEXTAUTH_URL;
       else process.env.NEXTAUTH_URL = previousAuthUrl;

@@ -5,6 +5,8 @@ import { env } from "@/lib/env";
 import { authAdapter, ensurePersistentGoogleIdentity } from "@/lib/auth/firestore-identity";
 import { AUTH_SESSION_STRATEGY, exposePersistentUserId, persistUserIdInJwt } from "@/lib/auth/session-identity";
 import { emailProviders } from "./auth/email-provider";
+import { AUTH_ERROR_PATH, CHECK_EMAIL_PATH } from "./auth/login-policy";
+import { googleIdentityFailure } from "./auth/google-signin-result";
 
 export const authOptions: NextAuthOptions = {
   adapter: authAdapter,
@@ -36,8 +38,8 @@ export const authOptions: NextAuthOptions = {
         await ensurePersistentGoogleIdentity(account, profile);
         return true;
       } catch (error) {
-        console.error("Persistent Google identity bootstrap failed:", error);
-        return false;
+        console.error("AUTH_GOOGLE_IDENTITY_FAILED");
+        return googleIdentityFailure(error);
       }
     },
     async jwt({ token, user }) {
@@ -59,7 +61,9 @@ export const authOptions: NextAuthOptions = {
     }
   },
   pages: {
-    signIn: "/login" // Custom login page route
+    signIn: "/login",
+    verifyRequest: CHECK_EMAIL_PATH,
+    error: AUTH_ERROR_PATH
   },
   session: {
     strategy: AUTH_SESSION_STRATEGY,

@@ -1,33 +1,24 @@
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { redirect } from "next/navigation";
-import { LoginButton } from "@/components/auth/login-button";
+import { LoginMethods } from "@/components/auth/login-methods";
+import { loginPageState } from "@/lib/auth/login-policy";
+import { LoginErrorNotice } from "@/components/auth/auth-notice";
 import Link from "next/link";
 
 interface LoginPageProps {
-  searchParams: Promise<{ callbackUrl?: string | string[] }>;
+  searchParams: Promise<{ callbackUrl?: string | string[]; error?: string | string[] }>;
 }
 
 export default async function LoginPage({ searchParams }: LoginPageProps) {
   const resolvedParams = await searchParams;
-  const requestedCallback = typeof resolvedParams.callbackUrl === "string" ? resolvedParams.callbackUrl : "";
-  let callbackUrl = "/dashboard";
-  try {
-    const parsedCallback = new URL(requestedCallback, "https://docstack.invalid");
-    if (
-      parsedCallback.origin === "https://docstack.invalid" &&
-      ["/checkout/cancel", "/success"].includes(parsedCallback.pathname)
-    ) {
-      callbackUrl = `${parsedCallback.pathname}${parsedCallback.search}`;
-    }
-  } catch {
-    // Invalid or external callbacks fall back to the authenticated dashboard.
-  }
 
   // If the user is already logged in, seamlessly bounce them to their dashboard
   const session = await getServerSession(authOptions);
-  if (session?.user) {
-    redirect(callbackUrl);
+  const emailEnabled = authOptions.providers.some(provider => provider.id === "email");
+  const { callbackUrl, redirectTo, errorMessage } = loginPageState(resolvedParams, emailEnabled, !!session?.user);
+  if (redirectTo) {
+    redirect(redirectTo);
   }
 
   return (
@@ -41,8 +32,9 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
           <p className="mt-2 text-sm text-muted-foreground">Sign in to access your purchases and templates.</p>
         </div>
 
+        <LoginErrorNotice message={errorMessage} />
         <div className="mt-8">
-          <LoginButton callbackUrl={callbackUrl} />
+          <LoginMethods callbackUrl={callbackUrl} emailEnabled={emailEnabled} />
         </div>
 
         <p className="mt-6 text-center text-xs text-muted-foreground">

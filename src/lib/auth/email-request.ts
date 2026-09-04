@@ -1,6 +1,7 @@
 import type { NextAuthOptions } from "next-auth";
 import { normalizeIdentityEmail } from "./identity-email";
 import { trustedClientIp } from "./email-rate-limit";
+import { VERIFY_REQUEST_PATH } from "./login-policy";
 
 export type EmailRequestDependencies = {
   authUrl: string;
@@ -18,7 +19,7 @@ export function emailRequestOptions(base: NextAuthOptions, request: Pick<Request
   const options = { ...base };
   const initiation = request.method === "POST" && segments.length === 2 && segments[0] === "signin" && segments[1] === "email";
   if (!initiation || !base.providers.some(provider => provider.id === "email")) return options;
-  const neutral = new URL("/api/auth/verify-request?provider=email&type=email", deps.authUrl).href;
+  const neutral = new URL(VERIFY_REQUEST_PATH, deps.authUrl).href;
   return {
     ...options,
     // v4 looks up a User before the verificationRequest callback. During this

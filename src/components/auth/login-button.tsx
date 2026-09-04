@@ -1,6 +1,6 @@
 "use client"; // <-- CRITICAL: Must be the very first line
 
-import { useState } from "react";
+import React, { useState } from "react";
 import { signIn } from "next-auth/react";
 import { Loader2 } from "lucide-react";
 
@@ -9,13 +9,11 @@ export function LoginButton({ callbackUrl = "/dashboard" }: { callbackUrl?: stri
 
   const handleLogin = async () => {
     try {
-      console.log("🟡 Login button clicked! Attempting Google Auth...");
       setIsLoading(true);
 
       // Trigger NextAuth Google login
       await signIn("google", { callbackUrl });
-    } catch (error) {
-      console.error("❌ Sign in error:", error);
+    } catch {
       setIsLoading(false);
     }
   };

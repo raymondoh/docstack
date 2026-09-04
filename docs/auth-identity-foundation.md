@@ -62,7 +62,39 @@ Deployment work (not performed in this phase): keep `AUTH_EMAIL_ENABLED=false` i
 
 Tests mock only delivery for the email integration flow and use the real guarded adapter, Firestore Emulator, request-local route option builder and installed NextAuth v4 core. Direct POST coverage includes CSRF rejection, enabled/disabled provider, a successful request, neutral throttling, no identity lookup/creation, and failed storage. This is a core/request-boundary integration test, not a running-server/browser E2E test. Emulator guards require loopback and a demo project. Existing Phase 2A.2a/2A.2b suites run unchanged alongside the new cases.
 
-## Production inventory commands
+## Phase 2A.2d: customer login experience (deploy disabled)
+
+The server login page renders email only when the Email provider is actually registered. Google remains first and keeps its account chooser. Both buttons receive the same restricted callback (`/dashboard` default; `/success` and `/checkout/cancel` with query strings). Existing sessions still redirect immediately. Email uses NextAuth's CSRF, normalization, throttle, verification and guarded adapter flow without any account/order lookup in the UI.
+
+`/login/check-email` is static and neutral. Accepted, throttled and unavailable admissions all reach it through the shared NextAuth verify-request endpoint (the email client may navigate directly after the same neutral response). It neither echoes an address nor sends again. `/login/error` maps only allowlisted codes to static recovery messages; unknown input is never echoed. A genuine `LINKING_REQUIRED` Google bootstrap failure routes to safe recovery, never automatic linking. New email users receive opaque IDs; Google-backed email callbacks retain their Google subject. Guest orders remain unclaimed regardless of email equality.
+
+Mandatory server-only collections: **users, accounts, sessions, verificationTokens, authIdentityKeys, authRateLimits**. Deny all browser/client access; do not loosen existing Firestore rules. TTL is cleanup only, not authentication or rate-limit enforcement. Later policies: collection group `verificationTokens`, field `expires`; collection group `authRateLimits`, field `cleanupAt`. **authIdentityKeys → NEVER TTL.** None are configured by this phase.
+
+### Manual rollout after review, commit and disabled deployment
+
+NextAuth v4 routes standard sign-in errors (including `OAuthAccountNotLinked`, `OAuthSignin`, `OAuthCallback` and `OAuthCreateAccount`) through `/api/auth/signin` to `/login?error=...`, rather than `pages.error`. The login card displays these through the same static allowlist used by `/login/error`, without echoing raw query values. Existing sessions redirect to the restricted callback before showing any stale notice. A regression follows both installed NextAuth core redirects and then exercises the login state/notice used by the page; no OAuth traffic is sent.
+
+The existing callback policy is intentionally unchanged: direct relative `/success?...` and `/checkout/cancel` callbacks survive error rendering; absolute callbacks, including those expanded by NextAuth's default redirect callback, fall back to `/dashboard`. Preserving those absolute same-origin round trips would require a separately reviewed callback-policy change.
+
+1. Verify the production identity inventory remains clean using the explicit read-only inventory safeguards.
+2. Verify production `/api/auth/providers` contains Google only.
+3. Generate a new independent `AUTH_RATE_LIMIT_SECRET` of at least 32 random characters.
+4. Add it to Vercel as a server secret; never use a `NEXT_PUBLIC_` variable.
+5. Configure the two TTL cleanup policies specified above.
+6. Verify browser/client Firestore access is denied for all six collections listed above.
+7. Set `AUTH_EMAIL_ENABLED=true` deliberately.
+8. Redeploy.
+9. Confirm `/api/auth/providers` contains Google and Email.
+10. Confirm the login UI shows both methods.
+11. Perform one real magic-link login with an existing Google-backed user.
+12. Confirm the same historical purchase remains owned and available.
+13. Optionally test a new email-only user.
+14. Rerun the production inventory.
+15. If unexpected identity conflicts appear, disable email immediately before investigation.
+
+First-line rollback: **`AUTH_EMAIL_ENABLED=false` → redeploy**. This removes provider/UI while preserving Google login, Users, identity keys, existing JWT sessions and purchases. Do not delete identity or verification-token collections. Do not execute this runbook during the coding pass.
+
+### Production inventory commands
 
 Before production deployment, run the read-only inventory deliberately with the exact Firebase project ID:
 
