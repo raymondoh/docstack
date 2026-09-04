@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { loadEnvConfig } from "@next/env";
 import { AUTH_COLLECTIONS } from "../src/lib/auth/collections";
+import { inspectIdentityKeys, opaqueId } from "../src/lib/auth/identity-inventory";
 
 const CONFIRMATION = "READ_ONLY_AUTH_INVENTORY";
 const PAGE_SIZE = 500;
@@ -39,7 +40,7 @@ function increment(record: Record<string, number>, key: string) {
 
 function addSample(collector: SampleCollector, documentId: string) {
   collector.count += 1;
-  if (collector.documentIds.length < SAMPLE_LIMIT) collector.documentIds.push(documentId);
+  if (collector.documentIds.length < SAMPLE_LIMIT) collector.documentIds.push(opaqueId(documentId));
 }
 
 function nonEmptyString(value: unknown): value is string {
@@ -144,7 +145,7 @@ async function main() {
       if (userId && checkoutMode !== "guest") authenticatedOrderUserIds.add(userId);
 
       if (userId) {
-        const summary = (orderCountsByUserId[userId] ??= { count: 0, statuses: {} });
+        const summary = (orderCountsByUserId[opaqueId(userId)] ??= { count: 0, statuses: {} });
         summary.count += 1;
         increment(summary.statuses, status);
         if (createdAt !== undefined) {
@@ -240,6 +241,11 @@ async function main() {
       )
     )
   );
+  const identityInspection = await inspectIdentityKeys(adminDb);
+  const historicalOwnersWithoutCanonicalUser: SampleCollector = { count: 0, documentIds: [] };
+  for (const userId of authenticatedOrderUserIds) {
+    if (!identityInspection.userIds.has(userId)) addSample(historicalOwnersWithoutCanonicalUser, userId);
+  }
   const collectionCounts = {
     [AUTH_COLLECTIONS.users]: userCount,
     [AUTH_COLLECTIONS.accounts]: accountCount,
@@ -270,7 +276,7 @@ async function main() {
     checkoutAttempts: {
       total: attemptTotal,
       distinctAuthenticatedUserIds: authenticatedAttemptUserIds.size,
-      authenticatedUserIds: [...authenticatedAttemptUserIds].sort(),
+      authenticatedUserIds: [...authenticatedAttemptUserIds].map(opaqueId).sort(),
       attemptsWithoutOwnedOrders,
       malformedUserIds: malformedAttemptUserIds
     },
@@ -279,14 +285,16 @@ async function main() {
       malformedUsers,
       malformedAccounts,
       duplicateProviderAccounts: duplicateAccounts,
-      representativeGoogleLookup
+      representativeGoogleLookup,
+      identityKeys: identityInspection.diagnostics,
+      historicalOwnersWithoutCanonicalUser
     },
     collectionCompatibility: {
       applicationCollections: APP_COLLECTIONS,
       adapterCollections: AUTH_COLLECTIONS,
       adapterCollectionConflicts,
       hasConflict: adapterCollectionConflicts.length > 0,
-      authIdentityKeysDeferredUntilEmailPhase: true
+      authIdentityKeysEnabled: true
     },
     notes: [
       "No Firestore writes were performed.",
@@ -294,7 +302,8 @@ async function main() {
       "Order email fields were neither selected nor used for identity association.",
       "A non-null order userId is inventory evidence only; this report does not assert that it is a Google subject.",
       "Unseeded identities must bootstrap from a fresh authoritative Google OAuth response or be handled manually.",
-      "Document ID samples are capped at " + SAMPLE_LIMIT + "."
+      "Document identifiers are hashed; samples are capped at " + SAMPLE_LIMIT + ".",
+      "Pagination is not a database-wide snapshot. Repeat during quiet traffic before migration."
     ]
   };
 
@@ -302,6 +311,7 @@ async function main() {
 }
 
 main().catch(error => {
-  console.error(error instanceof Error ? error.message : "Authentication inventory failed.");
+  console.error(error instanceof Error && error.message.startsWith("Refusing to run.") ? error.message :
+    "Authentication inventory failed. Check the confirmed project, environment and server diagnostics; no writes were requested.");
   process.exitCode = 1;
 });

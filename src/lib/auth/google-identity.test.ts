@@ -65,7 +65,7 @@ describe("Google persistent identity bootstrap", () => {
         accountOwnerIds: ["different-user"],
         emailOwnerIds: []
       })
-    , /already owned/);
+    , /manual review/);
   });
 
   it("requires a verified authoritative Google profile and never accepts order email data", () => {

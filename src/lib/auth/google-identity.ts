@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 import type { Account, Profile } from "next-auth";
+import { IdentityConflictError, normalizeIdentityEmail } from "./identity-email";
+export { normalizeIdentityEmail } from "./identity-email";
 
 type GoogleProfile = Profile & {
   sub?: string;
@@ -39,10 +41,6 @@ export function googleAccountRecord(identity: GoogleIdentityInput) {
   };
 }
 
-export function normalizeIdentityEmail(email: string) {
-  return email.trim().toLowerCase();
-}
-
 export function googleAccountDocumentId(providerAccountId: string) {
   return createHash("sha256").update(`google\0${providerAccountId}`).digest("hex");
 }
@@ -59,7 +57,7 @@ export function parseAuthoritativeGoogleIdentity(
   const subject = googleProfile?.sub;
   const email = googleProfile?.email;
 
-  if (!subject || subject !== account.providerAccountId) {
+  if (typeof subject !== "string" || !subject || subject.includes("/") || subject !== account.providerAccountId) {
     throw new Error("Google subject did not match the OAuth account identifier.");
   }
   if (!email || googleProfile.email_verified !== true) {
@@ -87,12 +85,12 @@ export function planGoogleIdentityBootstrap(
 
   const conflictingAccountOwner = state.accountOwnerIds.find(ownerId => ownerId !== identity.subject);
   if (conflictingAccountOwner || (state.canonicalAccountOwnerId && state.canonicalAccountOwnerId !== identity.subject)) {
-    throw new Error("Google account is already owned by another persistent user.");
+    throw new IdentityConflictError();
   }
 
   const conflictingEmailOwner = state.emailOwnerIds.find(ownerId => ownerId !== identity.subject);
   if (conflictingEmailOwner) {
-    throw new Error("Verified Google email is already attached to another persistent user.");
+    throw new IdentityConflictError("LINKING_REQUIRED");
   }
 
   return {
