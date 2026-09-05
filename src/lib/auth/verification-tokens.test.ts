@@ -2,11 +2,42 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { it } from "node:test";
 import { Timestamp } from "firebase-admin/firestore";
-import { verificationTokenDocumentId, verificationTokenRecord, VerificationTokenIntegrityError } from "./verification-tokens";
+import { createVerificationTokenStore, verificationTokenDocumentId, verificationTokenRecord, VerificationTokenIntegrityError } from "./verification-tokens";
 
 const token = "a".repeat(64); // Synthetic NextAuth-hash-shaped fixture.
 const identifier = "buyer@example.com";
 const expires = new Date("2030-01-01");
+
+async function captureInfo(run: () => unknown | Promise<unknown>) {
+  const original = console.info;
+  const calls: unknown[][] = [];
+  console.info = (...args: unknown[]) => { calls.push(args); };
+  let error: unknown;
+  try { await run(); } catch (caught) { error = caught; } finally { console.info = original; }
+  return { calls, error };
+}
+
+it("logs only constant token-creation stages and preserves success/failure semantics", async () => {
+  function store(existing: boolean) {
+    const ref = {};
+    const db = {
+      collection: () => ({ doc: () => ref }),
+      runTransaction: async (run: (tx: { get: () => Promise<{ exists: boolean }>; create: () => void }) => Promise<unknown>) =>
+        run({ get: async () => ({ exists: existing }), create: () => {} })
+    };
+    return createVerificationTokenStore(db as never);
+  }
+  const input = { identifier, token, expires };
+  const successful = (await captureInfo(async () => assert.deepEqual(await store(false).createVerificationToken(input), input))).calls;
+  assert.deepEqual(successful.flat(), ["AUTH_EMAIL_TOKEN_CREATE_STARTED", "AUTH_EMAIL_TOKEN_RECORD_VALID", "AUTH_EMAIL_TOKEN_TRANSACTION_STARTED", "AUTH_EMAIL_TOKEN_CREATE_SUCCEEDED"]);
+  const failed = (await captureInfo(async () => assert.rejects(store(true).createVerificationToken(input), VerificationTokenIntegrityError))).calls;
+  assert.deepEqual(failed.flat(), ["AUTH_EMAIL_TOKEN_CREATE_STARTED", "AUTH_EMAIL_TOKEN_RECORD_VALID", "AUTH_EMAIL_TOKEN_TRANSACTION_STARTED", "AUTH_EMAIL_TOKEN_CREATE_FAILED"]);
+  const invalid = (await captureInfo(async () => assert.rejects(store(false).createVerificationToken({ ...input, identifier: "private@@example.com" }), VerificationTokenIntegrityError))).calls;
+  assert.deepEqual(invalid.flat(), ["AUTH_EMAIL_TOKEN_CREATE_STARTED", "AUTH_EMAIL_TOKEN_CREATE_FAILED"]);
+  for (const call of [...successful, ...failed, ...invalid]) assert.equal(call.length, 1);
+  assert.ok(![...successful, ...failed, ...invalid].flat().join(" ").includes(identifier));
+  assert.ok(![...successful, ...failed, ...invalid].flat().join(" ").includes(token));
+});
 
 it("uses a canonical, domain-separated versioned token locator", () => {
   const expected = "verification-v1_" + createHash("sha256")

@@ -11,6 +11,44 @@ const settings = { enabled: true, from: "DocStack <signin@example.com>", apiKey:
 const token = "synthetic-link-token";
 const url = `https://example.com/api/auth/callback/email?token=${token}&email=buyer%40example.com&callbackUrl=https%3A%2F%2Fexample.com`;
 
+async function captureInfo(run: () => unknown | Promise<unknown>) {
+  const original = console.info;
+  const calls: unknown[][] = [];
+  console.info = (...args: unknown[]) => { calls.push(args); };
+  let error: unknown;
+  try { await run(); } catch (caught) { error = caught; } finally { console.info = original; }
+  return { calls, error };
+}
+
+it("logs only constant delivery stages for success and each sanitized failure", async () => {
+  async function run(send: AuthEmailSender, requestUrl = url) {
+    return captureInfo(async () => {
+      const provider = emailProviders(settings, send)[0];
+      await provider.sendVerificationRequest({ identifier: "buyer@example.com", token, url: requestUrl, provider, expires: new Date(), theme: {} });
+    });
+  }
+  const successResult = await run(async () => ({ data: { id: "synthetic" } }));
+  assert.equal(successResult.error, undefined);
+  const success = successResult.calls;
+  assert.deepEqual(success.flat(), ["AUTH_EMAIL_SEND_STARTED", "AUTH_EMAIL_LINK_VALIDATION_PASSED", "AUTH_EMAIL_RESEND_STARTED", "AUTH_EMAIL_RESEND_SUCCEEDED"]);
+  for (const [send, diagnostic] of [
+    [async () => ({ error: { private: url } }), "AUTH_EMAIL_RESEND_RETURNED_ERROR"],
+    [async () => { throw new Error(url); }, null]
+  ] as const) {
+    const result = await run(send);
+    assert.match(String(result.error), /Authentication email delivery failed/u);
+    const calls = result.calls;
+    assert.deepEqual(calls.flat(), ["AUTH_EMAIL_SEND_STARTED", "AUTH_EMAIL_LINK_VALIDATION_PASSED", "AUTH_EMAIL_RESEND_STARTED", ...(diagnostic ? [diagnostic] : []), "AUTH_EMAIL_SEND_FAILED"]);
+  }
+  const validationResult = await run(async () => ({ data: { id: "unused" } }), url.replace("example.com/", "evil.example/"));
+  assert.match(String(validationResult.error), /Authentication email delivery failed/u);
+  const validation = validationResult.calls;
+  assert.deepEqual(validation.flat(), ["AUTH_EMAIL_SEND_STARTED", "AUTH_EMAIL_LINK_VALIDATION_FAILED", "AUTH_EMAIL_SEND_FAILED"]);
+  for (const call of [...success, ...validation]) assert.equal(call.length, 1);
+  assert.ok(![...success, ...validation].flat().join(" ").includes("buyer@example.com"));
+  assert.ok(![...success, ...validation].flat().join(" ").includes(token));
+});
+
 it("validates enabled email and its secret together before request handling", () => {
   for (const flag of [undefined, "", "false"]) {
     const parsed = authEmailSettingsSchema.parse({ AUTH_EMAIL_ENABLED: flag });

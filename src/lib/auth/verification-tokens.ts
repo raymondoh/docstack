@@ -46,15 +46,25 @@ export function createVerificationTokenStore(db: Firestore) {
   const collection = db.collection(AUTH_COLLECTIONS.verificationTokens);
 
   async function createVerificationToken(input: VerificationToken): Promise<VerificationToken> {
-    const record = verificationTokenRecord({ ...input, identifier: canonicalIdentifier(input.identifier) });
-    const ref = collection.doc(verificationTokenDocumentId(record.identifier, record.token));
-    return db.runTransaction(async tx => {
-      const existing = await tx.get(ref);
-      // Even identical duplicate creation fails closed; never extend/overwrite a link.
-      if (existing.exists) throw new VerificationTokenIntegrityError();
-      tx.create(ref, { ...record, expires: Timestamp.fromDate(record.expires) });
-      return record;
-    });
+    console.info("AUTH_EMAIL_TOKEN_CREATE_STARTED");
+    try {
+      const record = verificationTokenRecord({ ...input, identifier: canonicalIdentifier(input.identifier) });
+      console.info("AUTH_EMAIL_TOKEN_RECORD_VALID");
+      const ref = collection.doc(verificationTokenDocumentId(record.identifier, record.token));
+      console.info("AUTH_EMAIL_TOKEN_TRANSACTION_STARTED");
+      const created = await db.runTransaction(async tx => {
+        const existing = await tx.get(ref);
+        // Even identical duplicate creation fails closed; never extend/overwrite a link.
+        if (existing.exists) throw new VerificationTokenIntegrityError();
+        tx.create(ref, { ...record, expires: Timestamp.fromDate(record.expires) });
+        return record;
+      });
+      console.info("AUTH_EMAIL_TOKEN_CREATE_SUCCEEDED");
+      return created;
+    } catch (error) {
+      console.info("AUTH_EMAIL_TOKEN_CREATE_FAILED");
+      throw error;
+    }
   }
 
   async function useVerificationToken(input: { identifier: string; token: string }): Promise<VerificationToken | null> {
