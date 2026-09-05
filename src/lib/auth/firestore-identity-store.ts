@@ -4,7 +4,15 @@ import { Timestamp, type Firestore } from "firebase-admin/firestore";
 import type { Account, Profile } from "next-auth";
 import type { Adapter, AdapterUser } from "next-auth/adapters";
 import { AUTH_COLLECTIONS } from "./collections";
-import { googleAccountDocumentId, googleAccountRecord, parseAuthoritativeGoogleIdentity, planGoogleIdentityBootstrap } from "./google-identity";
+import {
+  explicitGoogleAccountRecord,
+  googleAccountDocumentId,
+  googleAccountOwnership,
+  googleAccountRecord,
+  parseAuthoritativeGoogleIdentity,
+  planGoogleIdentityBootstrap,
+  validPersistentUserId
+} from "./google-identity";
 import { assertEstablishedEmail, IdentityConflictError, normalizeIdentityEmail } from "./identity-email";
 import { adapterUser, identityKeyRecord, readEmailIdentity } from "./identity-records";
 import { createVerificationTokenStore } from "./verification-tokens";
@@ -20,6 +28,41 @@ export function createFirestoreIdentityStore(firestore: Firestore) {
     return users.doc(id);
   }
 
+  async function googleAccountEntries(tx: FirebaseFirestore.Transaction, providerAccountId: string) {
+    const accounts = firestore.collection(AUTH_COLLECTIONS.accounts);
+    const canonicalRef = accounts.doc(googleAccountDocumentId(providerAccountId));
+    const [matches, canonical] = await Promise.all([
+      tx.get(accounts.where("provider", "==", "google").where("providerAccountId", "==", providerAccountId).limit(2)),
+      tx.get(canonicalRef)
+    ]);
+    if (matches.size > 1) throw new IdentityConflictError();
+    const records = new Map<string, FirebaseFirestore.DocumentSnapshot>(
+      matches.docs.map(doc => [doc.id, doc])
+    );
+    if (canonical.exists) records.set(canonical.id, canonical);
+    if (records.size > 1) throw new IdentityConflictError();
+    const entry = [...records.entries()][0];
+    if (entry && entry[0] !== canonicalRef.id) throw new IdentityConflictError();
+    return { canonicalRef, entry };
+  }
+
+  async function validateGoogleAccountOwner(tx: FirebaseFirestore.Transaction, providerAccountId: string,
+    entry: [string, FirebaseFirestore.DocumentSnapshot] | undefined,
+    resolvedEmail?: Awaited<ReturnType<typeof readEmailIdentity>>) {
+    if (!entry) return null;
+    const ownership = googleAccountOwnership(entry[1].data()!, providerAccountId);
+    const ownerSnap = await tx.get(userRef(ownership.userId));
+    if (!ownerSnap.exists) throw new IdentityConflictError();
+    const owner = adapterUser(ownerSnap.id, ownerSnap.data()!);
+    if (ownership.mode === "explicit") {
+      if (!(owner.emailVerified instanceof Date)) throw new IdentityConflictError();
+      const resolved = resolvedEmail ?? await readEmailIdentity(firestore, tx, owner.email);
+      if (!resolved.keyExists || resolved.keyRef.id !== ownership.linkedEmailKeyId ||
+          resolved.owner?.id !== ownership.userId) throw new IdentityConflictError();
+    }
+    return { ownership, owner, ownerSnap };
+  }
+
   // Never use the stock User converter: a persisted id can override snapshot.id.
   async function getUser(id: string) {
     const snap = await userRef(id).get();
@@ -28,20 +71,18 @@ export function createFirestoreIdentityStore(firestore: Firestore) {
 
   async function getUserByAccount({ provider, providerAccountId }: { provider: string; providerAccountId: string }) {
     return firestore.runTransaction(async tx => {
-      const accounts = firestore.collection(AUTH_COLLECTIONS.accounts);
-      const matches = await tx.get(accounts.where("provider", "==", provider)
-        .where("providerAccountId", "==", providerAccountId).limit(2));
-      if (matches.size > 1) throw new IdentityConflictError();
-      const records = new Map(matches.docs.map(doc => [doc.id, doc.data()]));
       if (provider === "google") {
-        const canonical = await tx.get(accounts.doc(googleAccountDocumentId(providerAccountId)));
-        if (canonical.exists) records.set(canonical.id, canonical.data()!);
+        const { entry } = await googleAccountEntries(tx, providerAccountId);
+        const validated = await validateGoogleAccountOwner(tx, providerAccountId, entry);
+        return validated?.owner ?? null;
       }
-      if (!records.size) return null;
-      if (records.size !== 1) throw new IdentityConflictError();
-      const record = [...records.values()][0];
+      const matches = await tx.get(firestore.collection(AUTH_COLLECTIONS.accounts)
+        .where("provider", "==", provider).where("providerAccountId", "==", providerAccountId).limit(2));
+      if (matches.empty) return null;
+      if (matches.size !== 1) throw new IdentityConflictError();
+      const record = matches.docs[0].data();
       if (record.provider !== provider || record.providerAccountId !== providerAccountId ||
-          (provider === "google" && (record.type !== "oauth" || record.userId !== providerAccountId))) {
+          typeof record.userId !== "string" || !record.userId || record.userId.includes("/")) {
         throw new IdentityConflictError();
       }
       const snap = await tx.get(userRef(record.userId));
@@ -126,40 +167,81 @@ export function createFirestoreIdentityStore(firestore: Firestore) {
 
   async function ensureGoogleIdentity(account: Account | null, profile: Profile | undefined) {
     const identity = parseAuthoritativeGoogleIdentity(account, profile);
-    const userRef = users.doc(identity.subject);
-    const accounts = firestore.collection(AUTH_COLLECTIONS.accounts);
-    const canonicalAccountRef = accounts.doc(googleAccountDocumentId(identity.providerAccountId));
+    const subjectRef = users.doc(identity.subject);
     return firestore.runTransaction(async tx => {
       // Match createUser's lock order: shared email key before user/account documents.
       const resolved = await readEmailIdentity(firestore, tx, identity.email);
-      const userSnap = await tx.get(userRef);
-      if (userSnap.exists) assertEstablishedEmail(adapterUser(userSnap.id, userSnap.data()!).email, identity.email);
-      const canonicalAccountSnap = await tx.get(canonicalAccountRef);
-      const accountSnaps = await tx.get(accounts.where("provider", "==", "google")
-        .where("providerAccountId", "==", identity.providerAccountId).limit(2));
-      if (accountSnaps.size > 1) throw new IdentityConflictError();
-      const accountRecords = new Map(accountSnaps.docs.map(doc => [doc.id, doc.data()]));
-      if (canonicalAccountSnap.exists) accountRecords.set(canonicalAccountSnap.id, canonicalAccountSnap.data()!);
-      for (const record of accountRecords.values()) {
-        if (record.userId !== identity.subject || record.provider !== "google" || record.type !== "oauth" ||
-            record.providerAccountId !== identity.subject || !userSnap.exists) throw new IdentityConflictError();
+      const subjectSnap = await tx.get(subjectRef);
+      if (subjectSnap.exists) assertEstablishedEmail(adapterUser(subjectSnap.id, subjectSnap.data()!).email, identity.email);
+      const { canonicalRef, entry } = await googleAccountEntries(tx, identity.providerAccountId);
+      const validated = await validateGoogleAccountOwner(tx, identity.providerAccountId, entry, resolved);
+      if (validated) {
+        if (validated.ownership.mode === "explicit") {
+          if (subjectSnap.exists || validated.ownership.linkedEmailKeyId !== resolved.keyRef.id ||
+              resolved.owner?.id !== validated.owner.id) throw new IdentityConflictError();
+          return { userId: validated.owner.id, createUser: false, createAccount: false };
+        }
+        if (validated.owner.id !== identity.subject || !subjectSnap.exists ||
+            resolved.owner?.id !== identity.subject) throw new IdentityConflictError();
       }
       const plan = planGoogleIdentityBootstrap(identity, {
-        userExists: userSnap.exists,
-        canonicalAccountOwnerId: canonicalAccountSnap.data()?.userId,
-        accountOwnerIds: [...accountRecords.values()].map(record => record.userId),
+        userExists: subjectSnap.exists,
+        canonicalAccountOwnerId: entry?.[1].data()?.userId,
+        accountOwnerIds: entry ? [entry[1].data()!.userId] : [],
         emailOwnerIds: resolved.owner ? [resolved.owner.id] : []
       });
       // All reads complete. Existing Google subjects and established emails stay put.
-      tx.set(userRef, {
+      tx.set(subjectRef, {
         name: identity.name ?? null,
-        email: userSnap.exists ? userSnap.data()!.email : identity.email,
-        emailVerified: userSnap.data()?.emailVerified ?? null,
+        email: subjectSnap.exists ? subjectSnap.data()!.email : identity.email,
+        emailVerified: subjectSnap.data()?.emailVerified ?? null,
         image: identity.image ?? null
       }, { merge: true });
-      if (plan.createAccount) tx.create(canonicalAccountRef, googleAccountRecord(identity));
+      if (plan.createAccount) tx.create(canonicalRef, googleAccountRecord(identity));
       if (!resolved.keyExists) tx.create(resolved.keyRef, identityKeyRecord(identity.subject));
       return plan;
+    });
+  }
+
+  async function linkGoogleIdentity(currentUserId: string, account: Account | null, profile: Profile | undefined) {
+    if (!validPersistentUserId(currentUserId)) throw new IdentityConflictError();
+    const identity = parseAuthoritativeGoogleIdentity(account, profile);
+    const linkedAt = Timestamp.now(); // Stable across transaction retries; never supplied by the client.
+    return firestore.runTransaction(async tx => {
+      const currentSnap = await tx.get(userRef(currentUserId));
+      if (!currentSnap.exists) throw new IdentityConflictError();
+      const currentUser = adapterUser(currentSnap.id, currentSnap.data()!);
+      if (currentUserId !== identity.subject && !(currentUser.emailVerified instanceof Date)) {
+        throw new IdentityConflictError();
+      }
+      assertEstablishedEmail(currentUser.email, identity.email);
+      const resolved = await readEmailIdentity(firestore, tx, currentUser.email);
+      const { canonicalRef, entry } = await googleAccountEntries(tx, identity.providerAccountId);
+      const subjectSnap = currentUserId === identity.subject ? currentSnap : await tx.get(userRef(identity.subject));
+      const ownedAccounts = await tx.get(firestore.collection(AUTH_COLLECTIONS.accounts)
+        .where("userId", "==", currentUserId));
+      const currentGoogleAccounts = ownedAccounts.docs.filter(doc => doc.data().provider === "google");
+      const validated = await validateGoogleAccountOwner(tx, identity.providerAccountId, entry, resolved);
+
+      if (!resolved.keyExists || resolved.owner?.id !== currentUserId) throw new IdentityConflictError();
+      if (currentGoogleAccounts.some(doc => doc.data().providerAccountId !== identity.providerAccountId)) {
+        throw new IdentityConflictError();
+      }
+      if (validated) {
+        if (validated.owner.id !== currentUserId) throw new IdentityConflictError();
+        if (validated.ownership.mode === "google_first" && currentUserId !== identity.subject) {
+          throw new IdentityConflictError();
+        }
+        if (validated.ownership.mode === "explicit" &&
+            validated.ownership.linkedEmailKeyId !== resolved.keyRef.id) throw new IdentityConflictError();
+        return { userId: currentUserId, alreadyLinked: true };
+      }
+      if (subjectSnap.exists && subjectSnap.id !== currentUserId) throw new IdentityConflictError();
+      // All reads complete. Users, identity keys and orders are deliberately immutable here.
+      tx.create(canonicalRef, currentUserId === identity.subject
+        ? googleAccountRecord(identity)
+        : explicitGoogleAccountRecord(identity, currentUserId, resolved.keyRef.id, linkedAt));
+      return { userId: currentUserId, alreadyLinked: false };
     });
   }
 
@@ -179,6 +261,7 @@ export function createFirestoreIdentityStore(firestore: Firestore) {
   return {
     authAdapter: { ...baseAdapter, ...createVerificationTokenStore(firestore), getUser, getUserByAccount, getSessionAndUser, getUserByEmail, createUser, updateUser } satisfies Adapter,
     ensurePersistentGoogleIdentity: ensureGoogleIdentity,
+    linkGoogleIdentityToUser: linkGoogleIdentity,
     seedIdentityKey
   };
 }

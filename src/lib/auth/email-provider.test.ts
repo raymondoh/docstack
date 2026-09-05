@@ -100,7 +100,7 @@ it("trusts only validated platform IP and uses a shared local bucket, never arbi
   assert.ok(!ids.join().includes("@") && !ids.join().includes("2001"));
 });
 
-it("request options fail closed on email storage failure without changing Google or the shared adapter", async () => {
+it("request options fail closed on email storage failure and leave ordinary Google authentication unchanged", async () => {
   let google = 0;
   const base: NextAuthOptions = {
     providers: emailProviders(settings), adapter: { getUserByEmail: async () => { throw new Error("Identity lookup must not run"); } },
@@ -116,7 +116,12 @@ it("request options fail closed on email storage failure without changing Google
   assert.equal(google, 0);
   const googleOptions = emailRequestOptions(base, request, ["signin", "google"], deps);
   assert.equal(googleOptions.adapter, base.adapter);
-  assert.equal(await googleOptions.callbacks!.signIn!({ user: { id: "sub" }, account: { provider: "google", type: "oauth", providerAccountId: "sub" } }), true);
+  assert.equal(googleOptions.callbacks, base.callbacks);
+  assert.equal(await googleOptions.callbacks!.signIn!({
+    user: { id: "opaque-email-first-user" },
+    account: { provider: "google", type: "oauth", providerAccountId: "new-google-sub" }
+  }), true);
+  assert.equal(google, 1);
   const callbackOptions = emailRequestOptions(base, request, ["callback", "email"], deps);
   assert.equal(callbackOptions.adapter, base.adapter);
 });

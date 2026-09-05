@@ -70,6 +70,29 @@ The server login page renders email only when the Email provider is actually reg
 
 Mandatory server-only collections: **users, accounts, sessions, verificationTokens, authIdentityKeys, authRateLimits**. Deny all browser/client access; do not loosen existing Firestore rules. TTL is cleanup only, not authentication or rate-limit enforcement. Later policies: collection group `verificationTokens`, field `expires`; collection group `authRateLimits`, field `cleanupAt`. **authIdentityKeys → NEVER TTL.** None are configured by this phase.
 
+## Phase 2A.3a: explicit Google-link foundation (no customer UI)
+
+The canonical User never changes during explicit linking. Historical Google-first identities remain `users/{googleSub}` with `account.userId == account.providerAccountId` and require no marker or migration. An explicit Google link owned by an email-first User may have `account.userId != account.providerAccountId` only with all of this versioned metadata:
+
+```text
+linkMode: "explicit"
+linkingVersion: 1
+linkedAt: Firestore Timestamp
+linkedEmailKeyId: deterministic authIdentityKeys document ID
+```
+
+The marker is valid only when the deterministic Google account document is unique, the referenced User exists, the referenced identity key exists and points to that User, and the key matches the User's canonical email. The account stores no additional plaintext email. Missing, malformed, duplicated, dangling or mismatched state fails closed. Existing marker-free Google-first records remain valid only when their User ID equals the authoritative Google subject.
+
+Phase 2A.3a is persistence and validation foundation only. The server-only `linkGoogleIdentityToUser` primitive has no customer HTTP route or UI caller in this phase. A valid logged-in session proves identity, but does not itself prove linking consent. Ordinary Google callbacks always retain the existing authentication/bootstrap path; JWT presence, query parameters, callback destinations, client IDs and submitted email addresses are not linking authority.
+
+When a future trusted caller invokes the primitive, the current User must already exist, have a valid persisted `emailVerified` value, own the canonical email identity key, and complete Google OAuth with the same canonical, verified email and matching `sub`/`providerAccountId`. The Google account must be unowned or already owned by that same User, and the User must not own a different Google account. Same-link retries are transactional and idempotent; concurrent attempts converge on the one deterministic mapping. No automatic same-email linking, dangerous provider linking, different-email linking, account replacement or unlinking is enabled.
+
+Installed NextAuth 4.24.15 invokes the configured `signIn` callback before its callback handler. The existing Google `signIn` callback either validates/creates the deterministic Google-first mapping, resolves an already-valid explicit mapping, or fails with `LINKING_REQUIRED` before the handler can reach its generic `linkAccount` branch. With no Phase 2A.3a explicit-link route, current supported Google and Email flows therefore cannot use the base adapter to create an arbitrary unmarked cross-ID Google account. Later ordinary Google sign-in validates a directly test-created explicit marker and resolves the same opaque User ID. Users, identity keys, orders and guest ownership are never rewritten.
+
+The read-only inventory counts valid `explicitGoogleLinks` separately. Cross-ID Google records are no longer reported as conflicts only when the complete explicit marker, deterministic account ID, User and identity-key ownership all validate. Historical Google-first accounts remain valid without marker fields. The updated inventory must be run before eventual deployment because the earlier production inventory did not validate deterministic Google account document IDs. No new collection, composite index, environment variable or TTL policy is introduced. All identity collections remain server-only.
+
+Phase 2A.3a intentionally adds no Account Connections page, Link Google button, Settings UI, recovery screen, order migration or guest claiming. Phase 2A.3b must add a deliberate Link Google action, a server-controlled short-lived intent bound to the current session and OAuth journey, one-time/replay protection, and customer Account Connections UI while retaining the ordinary NextAuth Google flow's existing CSRF/state protections and account chooser.
+
 ### Manual rollout after review, commit and disabled deployment
 
 NextAuth v4 routes standard sign-in errors (including `OAuthAccountNotLinked`, `OAuthSignin`, `OAuthCallback` and `OAuthCreateAccount`) through `/api/auth/signin` to `/login?error=...`, rather than `pages.error`. The login card displays these through the same static allowlist used by `/login/error`, without echoing raw query values. Existing sessions redirect to the restricted callback before showing any stale notice. A regression follows both installed NextAuth core redirects and then exercises the login state/notice used by the page; no OAuth traffic is sent.

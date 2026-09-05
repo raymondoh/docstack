@@ -3,6 +3,7 @@ import { FieldPath, type Firestore, type QueryDocumentSnapshot } from "firebase-
 import { AUTH_COLLECTIONS, AUTH_IDENTITY_KEYS } from "./collections";
 import { emailIdentityKeyId } from "./identity-email";
 import { adapterUser, hasConflictingStoredUserId, validIdentityKey } from "./identity-records";
+import { googleAccountDocumentId, googleAccountOwnership } from "./google-identity";
 
 export type Diagnostic = { count: number; samples: string[] };
 export function opaqueId(value: string) {
@@ -41,6 +42,7 @@ export async function inspectIdentityKeys(db: Firestore) {
   };
   const userIds = new Set<string>();
   const userKeys = new Map<string, string>();
+  const verifiedUserIds = new Set<string>();
   const owners = new Map<string, string>();
   await scanIdentityCollection(db, AUTH_COLLECTIONS.users, doc => {
     userIds.add(doc.id);
@@ -51,25 +53,43 @@ export async function inspectIdentityKeys(db: Firestore) {
       userKeys.set(doc.id, keyId);
       if (owners.has(keyId)) add("duplicateCanonicalUsers", keyId);
       else owners.set(keyId, doc.id);
+      if (user.emailVerified instanceof Date) verifiedUserIds.add(doc.id);
     } catch { add("malformedUsers", doc.id); }
   });
   const keys = new Set<string>();
+  const keyOwners = new Map<string, string>();
   await scanIdentityCollection(db, AUTH_IDENTITY_KEYS, doc => {
     keys.add(doc.id);
     const data = doc.data();
     if (!/^email-v1_[a-f0-9]{64}$/u.test(doc.id) || !validIdentityKey(data)) add("malformedIdentityKeys", doc.id);
     if (typeof data.userId !== "string" || !userIds.has(data.userId)) add("keysPointingToMissingUsers", doc.id);
-    else if (userKeys.get(data.userId) !== doc.id) add("inconsistentKeyEmails", doc.id);
+    else {
+      keyOwners.set(doc.id, data.userId);
+      if (userKeys.get(data.userId) !== doc.id) add("inconsistentKeyEmails", doc.id);
+    }
   });
   for (const [userId, keyId] of userKeys) {
     if (!keys.has(keyId)) add("usersMissingIdentityKeys", userId);
   }
   const providerKeys = new Set<string>();
+  let explicitGoogleLinks = 0;
   await scanIdentityCollection(db, AUTH_COLLECTIONS.accounts, doc => {
     const data = doc.data();
-    if (data.provider === "google" && (data.type !== "oauth" || typeof data.providerAccountId !== "string" ||
-        !data.providerAccountId || data.providerAccountId !== data.userId || !userIds.has(data.userId))) {
-      add("googleAccountUserConflicts", doc.id);
+    if (data.provider === "google") {
+      try {
+        const ownership = googleAccountOwnership(data, data.providerAccountId);
+        if (doc.id !== googleAccountDocumentId(data.providerAccountId) || !userIds.has(ownership.userId)) {
+          throw new Error("Invalid Google mapping.");
+        }
+        if (ownership.mode === "explicit") {
+          if (userKeys.get(ownership.userId) !== ownership.linkedEmailKeyId ||
+              !verifiedUserIds.has(ownership.userId) ||
+              keyOwners.get(ownership.linkedEmailKeyId) !== ownership.userId) {
+            throw new Error("Invalid explicit-link identity key.");
+          }
+          explicitGoogleLinks++;
+        }
+      } catch { add("googleAccountUserConflicts", doc.id); }
     }
     if (typeof data.provider === "string" && typeof data.providerAccountId === "string") {
       const key = data.provider + "\0" + data.providerAccountId;
@@ -77,5 +97,5 @@ export async function inspectIdentityKeys(db: Firestore) {
       providerKeys.add(key);
     }
   });
-  return { diagnostics, userIds, keyCount: keys.size };
+  return { diagnostics, userIds, keyCount: keys.size, explicitGoogleLinks };
 }

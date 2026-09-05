@@ -706,4 +706,242 @@ describe("Firestore-backed persistent Google identity", { skip: skipReason }, ()
     assert.equal(inspection.diagnostics.duplicateCanonicalUsers.count, 1);
     assert.equal((await firestore.collection(AUTH_IDENTITY_KEYS).get()).size, 0);
   });
+  it("explicitly links an email-first User once and later resolves the same opaque owner", async () => {
+    const user = await identityStore.authAdapter.createUser(emailInput);
+    const userBefore = (await firestore.collection(AUTH_COLLECTIONS.users).doc(user.id).get()).data();
+    const keyBefore = (await firestore.collection(AUTH_IDENTITY_KEYS).doc(keyId).get()).data();
+    const authenticatedOrder = { checkoutMode: "authenticated", userId: user.id, status: "paid" };
+    const guestOrder = { checkoutMode: "guest", userId: null, status: "paid" };
+    await firestore.collection("orders").doc("owned-before-link").set(authenticatedOrder);
+    await firestore.collection("orders").doc("guest-before-link").set(guestOrder);
+
+    const results = await Promise.all([
+      identityStore.linkGoogleIdentityToUser(user.id, account, profile),
+      identityStore.linkGoogleIdentityToUser(user.id, account, profile)
+    ]);
+    assert.equal(results.filter(result => result.userId === user.id).length, 2);
+    assert.deepEqual(results.map(result => result.alreadyLinked).sort(), [false, true]);
+    const mappings = await firestore.collection(AUTH_COLLECTIONS.accounts)
+      .where("provider", "==", "google").where("providerAccountId", "==", subject).get();
+    assert.equal(mappings.size, 1);
+    const accountSnap = await firestore.collection(AUTH_COLLECTIONS.accounts)
+      .doc(googleAccountDocumentId(subject)).get();
+    assert.deepEqual(Object.keys(accountSnap.data()!).sort(), [
+      "linkMode", "linkedAt", "linkedEmailKeyId", "linkingVersion",
+      "provider", "providerAccountId", "type", "userId"
+    ]);
+    assert.equal(accountSnap.data()?.userId, user.id);
+    assert.equal(accountSnap.data()?.providerAccountId, subject);
+    assert.equal(accountSnap.data()?.linkMode, "explicit");
+    assert.equal(accountSnap.data()?.linkingVersion, 1);
+    assert.ok(accountSnap.data()?.linkedAt);
+    assert.equal(accountSnap.data()?.linkedEmailKeyId, keyId);
+    assert.equal((await firestore.collection(AUTH_COLLECTIONS.users).doc(subject).get()).exists, false);
+    assert.deepEqual((await firestore.collection(AUTH_COLLECTIONS.users).doc(user.id).get()).data(), userBefore);
+    assert.deepEqual((await firestore.collection(AUTH_IDENTITY_KEYS).doc(keyId).get()).data(), keyBefore);
+    assert.deepEqual((await firestore.collection("orders").doc("owned-before-link").get()).data(), authenticatedOrder);
+    assert.deepEqual((await firestore.collection("orders").doc("guest-before-link").get()).data(), guestOrder);
+
+    const byAccount = await identityStore.authAdapter.getUserByAccount(account);
+    assert.equal(byAccount?.id, user.id);
+    assert.deepEqual(await identityStore.ensurePersistentGoogleIdentity(account, profile),
+      { userId: user.id, createUser: false, createAccount: false });
+    const jwt = persistUserIdInJwt({} as JWT, byAccount as User);
+    assert.equal(jwt.uid, user.id);
+    assert.equal(exposePersistentUserId({ user: {}, expires: "2030-01-01" } as Session, jwt).user.id, user.id);
+    assert.equal((await firestore.collection(AUTH_COLLECTIONS.users).get()).size, 1);
+    const inventory = await inspectIdentityKeys(firestore);
+    assert.equal(inventory.explicitGoogleLinks, 1);
+    assert.equal(inventory.diagnostics.googleAccountUserConflicts.count, 0);
+  });
+
+  it("keeps an authenticated historical Google-first mapping marker-free and idempotent", async () => {
+    await identityStore.ensurePersistentGoogleIdentity(account, profile);
+    await identityStore.linkGoogleIdentityToUser(subject, account, profile);
+    assert.deepEqual((await firestore.collection(AUTH_COLLECTIONS.accounts)
+      .doc(googleAccountDocumentId(subject)).get()).data(), {
+      provider: "google", providerAccountId: subject, type: "oauth", userId: subject
+    });
+    assert.equal((await inspectIdentityKeys(firestore)).explicitGoogleLinks, 0);
+  });
+
+  it("requires the current User, its owned identity key and the same verified Google email", async () => {
+    const user = await identityStore.authAdapter.createUser(emailInput);
+    await assert.rejects(identityStore.linkGoogleIdentityToUser("missing-user", account, profile), isConflict);
+    await assert.rejects(identityStore.linkGoogleIdentityToUser(user.id, account,
+      { ...profile, email: "different@example.com" }), isConflict);
+    await assert.rejects(identityStore.linkGoogleIdentityToUser(user.id, account,
+      { ...profile, email_verified: false }), /authoritative verified email/u);
+    await assert.rejects(identityStore.linkGoogleIdentityToUser(user.id,
+      { ...account, providerAccountId: "different-sub" }, profile), /subject did not match/u);
+    await firestore.collection(AUTH_IDENTITY_KEYS).doc(keyId).delete();
+    await assert.rejects(identityStore.linkGoogleIdentityToUser(user.id, account, profile), isConflict);
+    assert.equal((await firestore.collection(AUTH_COLLECTIONS.accounts).get()).size, 0);
+    assert.equal((await firestore.collection(AUTH_COLLECTIONS.users).doc(subject).get()).exists, false);
+  });
+
+  it("rejects an identity key owned by another User", async () => {
+    const user = await identityStore.authAdapter.createUser(emailInput);
+    await firestore.collection(AUTH_COLLECTIONS.users).doc("other-user").set({
+      email: "other@example.com", emailVerified: null, name: null, image: null
+    });
+    await firestore.collection(AUTH_IDENTITY_KEYS).doc(keyId).set(identityKeyRecord("other-user"));
+    await assert.rejects(identityStore.linkGoogleIdentityToUser(user.id, account, profile), isConflict);
+    assert.equal((await firestore.collection(AUTH_COLLECTIONS.accounts).get()).size, 0);
+  });
+
+  it("rejects Google ownership by another User and multiple Google accounts for one User", async () => {
+    const user = await identityStore.authAdapter.createUser(emailInput);
+    const other = await identityStore.authAdapter.createUser({
+      ...emailInput, email: "other@example.com"
+    });
+    const otherKey = emailIdentityKeyId("other@example.com");
+    await firestore.collection(AUTH_COLLECTIONS.accounts).doc(googleAccountDocumentId(subject)).set({
+      provider: "google", providerAccountId: subject, type: "oauth", userId: other.id,
+      linkMode: "explicit", linkingVersion: 1, linkedAt: new Date(),
+      linkedEmailKeyId: otherKey
+    });
+    await assert.rejects(identityStore.linkGoogleIdentityToUser(user.id, account, profile), isConflict);
+
+    await clearCollection(firestore, AUTH_COLLECTIONS.accounts);
+    const firstSubject = "first-google-sub";
+    await identityStore.linkGoogleIdentityToUser(user.id,
+      { ...account, providerAccountId: firstSubject },
+      { ...profile, sub: firstSubject });
+    await assert.rejects(identityStore.linkGoogleIdentityToUser(user.id, account, profile), isConflict);
+    assert.equal((await firestore.collection(AUTH_COLLECTIONS.accounts).get()).size, 1);
+  });
+
+  it("fails closed for malformed, dangling and duplicate explicit Google mappings", async () => {
+    const user = await identityStore.authAdapter.createUser(emailInput);
+    const canonical = firestore.collection(AUTH_COLLECTIONS.accounts).doc(googleAccountDocumentId(subject));
+    const valid = {
+      provider: "google", providerAccountId: subject, type: "oauth", userId: user.id,
+      linkMode: "explicit", linkingVersion: 1,
+      linkedAt: (await firestore.collection(AUTH_IDENTITY_KEYS).doc(keyId).get()).data()!.createdAt,
+      linkedEmailKeyId: keyId
+    };
+    for (const malformed of [
+      { ...valid, linkMode: "implicit" },
+      { ...valid, linkingVersion: 2 },
+      { ...valid, linkedAt: "invalid" },
+      { ...valid, linkedEmailKeyId: "bad" }
+    ]) {
+      await canonical.set(malformed);
+      await assert.rejects(identityStore.authAdapter.getUserByAccount(account), isConflict);
+      await assert.rejects(identityStore.ensurePersistentGoogleIdentity(account, profile), isConflict);
+    }
+
+    await canonical.set({ ...valid, userId: "missing-user" });
+    await assert.rejects(identityStore.authAdapter.getUserByAccount(account), isConflict);
+    await canonical.set(valid);
+    await firestore.collection(AUTH_COLLECTIONS.accounts).doc("duplicate-google-mapping").set(valid);
+    await assert.rejects(identityStore.authAdapter.getUserByAccount(account), isConflict);
+    await assert.rejects(identityStore.linkGoogleIdentityToUser(user.id, account, profile), isConflict);
+  });
+
+  it("keeps unauthenticated same-email Google bootstrap in LINKING_REQUIRED", async () => {
+    const user = await identityStore.authAdapter.createUser(emailInput);
+    await assert.rejects(identityStore.ensurePersistentGoogleIdentity(account, profile), isLinkingRequired);
+    assert.equal((await firestore.collection(AUTH_COLLECTIONS.users).get()).size, 1);
+    assert.equal((await firestore.collection(AUTH_COLLECTIONS.users).get()).docs[0].id, user.id);
+    assert.equal((await firestore.collection(AUTH_COLLECTIONS.accounts).get()).size, 0);
+  });
+
+  it("requires a valid persisted verified-email state for cross-ID linking", async () => {
+    const user = await identityStore.authAdapter.createUser(emailInput);
+    const ref = firestore.collection(AUTH_COLLECTIONS.users).doc(user.id);
+
+    await ref.update({ emailVerified: null });
+    await assert.rejects(identityStore.linkGoogleIdentityToUser(user.id, account, profile), isConflict);
+
+    await ref.update({ emailVerified: "invalid" });
+    await assert.rejects(identityStore.linkGoogleIdentityToUser(user.id, account, profile), isConflict);
+    assert.equal((await firestore.collection(AUTH_COLLECTIONS.accounts).get()).size, 0);
+    assert.equal((await firestore.collection(AUTH_COLLECTIONS.users).doc(subject).get()).exists, false);
+
+    await ref.update({ emailVerified: new Date(2000) });
+    await identityStore.linkGoogleIdentityToUser(user.id, account, profile);
+    await ref.update({ emailVerified: null });
+    await assert.rejects(identityStore.authAdapter.getUserByAccount(account), isConflict);
+    await assert.rejects(identityStore.ensurePersistentGoogleIdentity(account, profile), isConflict);
+    const inventory = await inspectIdentityKeys(firestore);
+    assert.equal(inventory.explicitGoogleLinks, 0);
+    assert.equal(inventory.diagnostics.googleAccountUserConflicts.count, 1);
+  });
+
+  it("allows at most one of two concurrent Google links for the same User", async () => {
+    const user = await identityStore.authAdapter.createUser(emailInput);
+    const subjects = ["concurrent-google-a", "concurrent-google-b"];
+    const attempts = subjects.map(providerAccountId => identityStore.linkGoogleIdentityToUser(
+      user.id,
+      { ...account, providerAccountId },
+      { ...profile, sub: providerAccountId }
+    ));
+    const results = await Promise.allSettled(attempts);
+    assert.equal(results.filter(result => result.status === "fulfilled").length, 1);
+    assert.equal(results.filter(result => result.status === "rejected").length, 1);
+
+    const owned = await firestore.collection(AUTH_COLLECTIONS.accounts).where("userId", "==", user.id).get();
+    assert.equal(owned.size, 1);
+    const winningSubject = owned.docs[0].data().providerAccountId;
+    assert.ok(subjects.includes(winningSubject));
+    assert.equal(owned.docs[0].id, googleAccountDocumentId(winningSubject));
+    assert.equal((await identityStore.authAdapter.getUserByAccount({
+      provider: "google", providerAccountId: winningSubject
+    }))?.id, user.id);
+    const losingSubject = subjects.find(candidate => candidate !== winningSubject)!;
+    assert.equal(await identityStore.authAdapter.getUserByAccount({
+      provider: "google", providerAccountId: losingSubject
+    }), null);
+    for (const candidate of subjects) {
+      assert.equal((await firestore.collection(AUTH_COLLECTIONS.users).doc(candidate).get()).exists, false);
+    }
+  });
+
+  it("gives exactly one User ownership when two verified Users concurrently link the same Google subject", async () => {
+    const first = await identityStore.authAdapter.createUser(emailInput);
+    const secondEmail = "other@example.com";
+    const second = await identityStore.authAdapter.createUser({ ...emailInput, email: secondEmail });
+    const firstProfile = { ...profile, email: emailInput.email };
+    const secondProfile = { ...profile, email: secondEmail };
+
+    const results = await Promise.allSettled([
+      identityStore.linkGoogleIdentityToUser(first.id, account, firstProfile),
+      identityStore.linkGoogleIdentityToUser(second.id, account, secondProfile)
+    ]);
+    assert.equal(results.filter(result => result.status === "fulfilled").length, 1);
+    assert.equal(results.filter(result => result.status === "rejected").length, 1);
+
+    const canonical = await firestore.collection(AUTH_COLLECTIONS.accounts)
+      .doc(googleAccountDocumentId(subject)).get();
+    assert.equal(canonical.exists, true);
+    const winner = results[0].status === "fulfilled" ? first : second;
+    assert.equal(canonical.data()?.userId, winner.id);
+    assert.equal((await firestore.collection(AUTH_COLLECTIONS.accounts)
+      .where("provider", "==", "google").where("providerAccountId", "==", subject).get()).size, 1);
+    assert.equal((await identityStore.authAdapter.getUserByAccount(account))?.id, winner.id);
+    assert.equal((await firestore.collection(AUTH_COLLECTIONS.users).doc(subject).get()).exists, false);
+  });
+
+  it("converges when explicit linking races normal unauthenticated Google bootstrap", async () => {
+    const user = await identityStore.authAdapter.createUser(emailInput);
+    const [link, bootstrap] = await Promise.allSettled([
+      identityStore.linkGoogleIdentityToUser(user.id, account, profile),
+      identityStore.ensurePersistentGoogleIdentity(account, profile)
+    ]);
+    assert.equal(link.status, "fulfilled");
+    if (bootstrap.status === "rejected") assert.ok(isLinkingRequired(bootstrap.reason));
+
+    const canonical = await firestore.collection(AUTH_COLLECTIONS.accounts)
+      .doc(googleAccountDocumentId(subject)).get();
+    assert.equal(canonical.data()?.userId, user.id);
+    assert.equal(canonical.data()?.linkMode, "explicit");
+    assert.equal((await firestore.collection(AUTH_COLLECTIONS.accounts).get()).size, 1);
+    assert.equal((await firestore.collection(AUTH_COLLECTIONS.users).get()).size, 1);
+    assert.equal((await firestore.collection(AUTH_COLLECTIONS.users).doc(subject).get()).exists, false);
+    assert.equal((await firestore.collection(AUTH_IDENTITY_KEYS).doc(keyId).get()).data()?.userId, user.id);
+    assert.deepEqual(await identityStore.ensurePersistentGoogleIdentity(account, profile),
+      { userId: user.id, createUser: false, createAccount: false });
+  });
 });

@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { Timestamp } from "firebase-admin/firestore";
+import { emailIdentityKeyId, IdentityConflictError } from "./identity-email";
 import {
+  explicitGoogleAccountRecord,
+  googleAccountOwnership,
   googleAccountRecord,
   googleAccountDocumentId,
   parseAuthoritativeGoogleIdentity,
@@ -45,6 +49,27 @@ describe("Google persistent identity bootstrap", () => {
       userId: subject,
       type: "oauth"
     });
+  });
+
+  it("marks only cross-ID ownership as a validated explicit link", () => {
+    const linkedAt = Timestamp.fromMillis(1234);
+    const keyId = emailIdentityKeyId(identity.email);
+    const record = explicitGoogleAccountRecord(identity, "opaque-user", keyId, linkedAt);
+    assert.deepEqual(googleAccountOwnership(record, subject), {
+      mode: "explicit", userId: "opaque-user", linkedEmailKeyId: keyId, linkedAt
+    });
+    assert.deepEqual(googleAccountOwnership(googleAccountRecord(identity), subject), {
+      mode: "google_first", userId: subject
+    });
+    for (const malformed of [
+      { ...record, linkMode: undefined },
+      { ...record, linkingVersion: 2 },
+      { ...record, linkedAt: new Date() },
+      { ...record, linkedEmailKeyId: "invalid" },
+      { ...record, email: "must-not-be-stored@example.com" },
+      { ...record, providerAccountId: "other" },
+      { ...record, userId: subject }
+    ]) assert.throws(() => googleAccountOwnership(malformed, subject), IdentityConflictError);
   });
 
   it("is idempotent when the persistent user and mapping already exist", () => {

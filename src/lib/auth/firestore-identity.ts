@@ -7,3 +7,4 @@ const identityStore = createFirestoreIdentityStore(adminDb);
 
 export const authAdapter = identityStore.authAdapter;
 export const ensurePersistentGoogleIdentity = identityStore.ensurePersistentGoogleIdentity;
+export const linkGoogleIdentityToUser = identityStore.linkGoogleIdentityToUser;

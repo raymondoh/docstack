@@ -287,6 +287,7 @@ async function main() {
       duplicateProviderAccounts: duplicateAccounts,
       representativeGoogleLookup,
       identityKeys: identityInspection.diagnostics,
+      explicitGoogleLinks: identityInspection.explicitGoogleLinks,
       historicalOwnersWithoutCanonicalUser
     },
     collectionCompatibility: {

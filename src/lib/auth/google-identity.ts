@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
+import { Timestamp } from "firebase-admin/firestore";
 import type { Account, Profile } from "next-auth";
-import { IdentityConflictError, normalizeIdentityEmail } from "./identity-email";
+import { emailIdentityKeyId, IdentityConflictError, normalizeIdentityEmail } from "./identity-email";
 export { normalizeIdentityEmail } from "./identity-email";
 
 type GoogleProfile = Profile & {
@@ -32,6 +33,15 @@ export type GoogleIdentityPlan = {
   createAccount: boolean;
 };
 
+export type GoogleAccountOwnership =
+  | { mode: "google_first"; userId: string }
+  | { mode: "explicit"; userId: string; linkedEmailKeyId: string; linkedAt: Timestamp };
+
+export function validPersistentUserId(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= 512 &&
+    !value.includes("/") && !/[\u0000-\u001f\u007f]/u.test(value);
+}
+
 export function googleAccountRecord(identity: GoogleIdentityInput) {
   return {
     userId: identity.subject,
@@ -39,6 +49,48 @@ export function googleAccountRecord(identity: GoogleIdentityInput) {
     provider: identity.provider,
     providerAccountId: identity.providerAccountId
   };
+}
+
+export function explicitGoogleAccountRecord(identity: GoogleIdentityInput, userId: string,
+  linkedEmailKeyId: string, linkedAt = Timestamp.now()) {
+  if (!validPersistentUserId(userId) || userId === identity.providerAccountId ||
+      linkedEmailKeyId !== emailIdentityKeyId(identity.email) || !(linkedAt instanceof Timestamp)) {
+    throw new IdentityConflictError();
+  }
+  return {
+    userId,
+    type: "oauth" as const,
+    provider: "google" as const,
+    providerAccountId: identity.providerAccountId,
+    linkMode: "explicit" as const,
+    linkingVersion: 1 as const,
+    linkedAt,
+    linkedEmailKeyId
+  };
+}
+
+export function googleAccountOwnership(data: Record<string, unknown>, providerAccountId: string): GoogleAccountOwnership {
+  if (!validPersistentUserId(providerAccountId) || data.provider !== "google" || data.type !== "oauth" ||
+      data.providerAccountId !== providerAccountId || !validPersistentUserId(data.userId)) {
+    throw new IdentityConflictError();
+  }
+  if (data.userId === providerAccountId) {
+    if (["linkMode", "linkingVersion", "linkedAt", "linkedEmailKeyId"].some(key => Object.hasOwn(data, key))) {
+      throw new IdentityConflictError();
+    }
+    return { mode: "google_first", userId: data.userId };
+  }
+  const explicitKeys = [
+    "userId", "type", "provider", "providerAccountId",
+    "linkMode", "linkingVersion", "linkedAt", "linkedEmailKeyId"
+  ];
+  if (Object.keys(data).length !== explicitKeys.length ||
+      !Object.keys(data).every(key => explicitKeys.includes(key)) ||
+      data.linkMode !== "explicit" || data.linkingVersion !== 1 || !(data.linkedAt instanceof Timestamp) ||
+      typeof data.linkedEmailKeyId !== "string" || !/^email-v1_[a-f0-9]{64}$/u.test(data.linkedEmailKeyId)) {
+    throw new IdentityConflictError();
+  }
+  return { mode: "explicit", userId: data.userId, linkedEmailKeyId: data.linkedEmailKeyId, linkedAt: data.linkedAt };
 }
 
 export function googleAccountDocumentId(providerAccountId: string) {
