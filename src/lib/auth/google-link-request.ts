@@ -1,5 +1,4 @@
 import type { Account, NextAuthOptions, Profile } from "next-auth";
-import type { NextRequest } from "next/server";
 import {
   clearGoogleLinkIntentCookie,
   googleOAuthStateFromResponse,
@@ -10,7 +9,7 @@ import {
 type GoogleLinkRequestRuntime = {
   authUrl: string;
   secureCookie: boolean;
-  session(request: NextRequest): Promise<GoogleLinkSession>;
+  session(request: Request): Promise<GoogleLinkSession>;
   validate(session: GoogleLinkSession, rawToken: string): Promise<void>;
   bind(session: GoogleLinkSession, rawToken: string, state: string): Promise<void>;
   consume(session: GoogleLinkSession, rawToken: string, state: string,
@@ -34,7 +33,7 @@ function fixedFailure(runtime: GoogleLinkRequestRuntime) {
   }), runtime.secureCookie);
 }
 
-export async function runGoogleLinkRequest(request: NextRequest, segments: string[], base: NextAuthOptions,
+export async function runGoogleLinkRequest(request: Request, segments: string[], base: NextAuthOptions,
   nextAuth: (options: NextAuthOptions) => Promise<Response>, runtime: GoogleLinkRequestRuntime) {
   const rawToken = readGoogleLinkIntentCookie(request, runtime.secureCookie);
   if (!rawToken || (!googleInitiation(segments, request.method) && !googleCallback(segments, request.method))) {
@@ -71,7 +70,9 @@ export async function runGoogleLinkRequest(request: NextRequest, segments: strin
         if (!session || !callbackState || account?.provider !== "google") return false;
         try {
           const result = await runtime.consume(session, rawToken, callbackState, account, profile);
-          return result.status === "linked";
+          return result.status === "linked"
+            ? true
+            : new URL("/dashboard/settings?google=error", runtime.authUrl).href;
         } catch {
           console.error("AUTH_GOOGLE_LINK_INTENT_FAILED");
           return false;

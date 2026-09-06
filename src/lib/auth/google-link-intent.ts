@@ -1,7 +1,6 @@
 import { createHash, createHmac, randomBytes } from "node:crypto";
 import { Timestamp } from "firebase-admin/firestore";
 import { decode, type JWT } from "next-auth/jwt";
-import type { NextRequest } from "next/server";
 import { validPersistentUserId } from "./google-identity";
 
 export const GOOGLE_LINK_INTENT_LIFETIME_SECONDS = 10 * 60;
@@ -117,7 +116,7 @@ export function nextAuthSessionCookieFromRequest(request: Request, secure: boole
   return token;
 }
 
-export async function googleLinkSessionFromRequest(request: NextRequest, secret: string, secureCookie: boolean) {
+export async function googleLinkSessionFromRequest(request: Request, secret: string, secureCookie: boolean) {
   return decodeGoogleLinkSession(nextAuthSessionCookieFromRequest(request, secureCookie), secret);
 }
 

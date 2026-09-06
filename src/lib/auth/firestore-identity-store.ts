@@ -26,6 +26,15 @@ import {
   validateGoogleLinkIntentRecord
 } from "./google-link-intent";
 
+export type GoogleConnectionState = {
+  googleConnected: boolean;
+  canConnectGoogle: boolean;
+};
+
+const GOOGLE_CONNECTED: GoogleConnectionState = { googleConnected: true, canConnectGoogle: false };
+const GOOGLE_NOT_CONNECTED: GoogleConnectionState = { googleConnected: false, canConnectGoogle: true };
+const GOOGLE_CONNECTION_UNAVAILABLE: GoogleConnectionState = { googleConnected: false, canConnectGoogle: false };
+
 export function createFirestoreIdentityStore(firestore: Firestore) {
   // The adapter has newer @auth/core types, but its runtime/schema contract is
   // deliberately bridged to v4. Keep this cast isolated and emulator-tested.
@@ -267,21 +276,59 @@ export function createFirestoreIdentityStore(firestore: Firestore) {
     return intent;
   }
 
+  async function googleConnectionStateInTransaction(tx: FirebaseFirestore.Transaction, userId: string) {
+    const currentSnap = await tx.get(userRef(userId));
+    if (!currentSnap.exists) throw new IdentityConflictError();
+    const currentUser = adapterUser(currentSnap.id, currentSnap.data()!);
+    const resolved = await readEmailIdentity(firestore, tx, currentUser.email);
+    if (!resolved.keyExists || resolved.owner?.id !== userId) throw new IdentityConflictError();
+
+    const ownedAccounts = await tx.get(firestore.collection(AUTH_COLLECTIONS.accounts)
+      .where("userId", "==", userId));
+    const googleAccounts = ownedAccounts.docs.filter(doc => doc.data().provider === "google");
+    if (googleAccounts.length === 0) {
+      if (!(currentUser.emailVerified instanceof Date)) throw new IdentityConflictError();
+      return GOOGLE_NOT_CONNECTED;
+    }
+    if (googleAccounts.length !== 1) throw new IdentityConflictError();
+
+    const providerAccountId = googleAccounts[0].data().providerAccountId;
+    if (!validPersistentUserId(providerAccountId)) throw new IdentityConflictError();
+    const { entry } = await googleAccountEntries(tx, providerAccountId);
+    const validated = await validateGoogleAccountOwner(tx, providerAccountId, entry, resolved);
+    if (!validated || validated.owner.id !== userId || googleAccounts[0].id !== entry?.[0]) {
+      throw new IdentityConflictError();
+    }
+    if (validated.ownership.mode === "google_first" && providerAccountId !== userId) {
+      throw new IdentityConflictError();
+    }
+    if (validated.ownership.mode === "explicit" &&
+        validated.ownership.linkedEmailKeyId !== resolved.keyRef.id) {
+      throw new IdentityConflictError();
+    }
+    return GOOGLE_CONNECTED;
+  }
+
+  async function getGoogleConnectionStateForUser(userId: string): Promise<GoogleConnectionState> {
+    try {
+      return await firestore.runTransaction(tx => googleConnectionStateInTransaction(tx, userId));
+    } catch {
+      return GOOGLE_CONNECTION_UNAVAILABLE;
+    }
+  }
+
   async function createGoogleLinkIntentForSession(session: GoogleLinkSession, rawToken: string,
     now = Timestamp.now()) {
     const ref = firestore.collection(GOOGLE_LINK_INTENTS).doc(googleLinkIntentDocumentId(rawToken));
     const record = googleLinkIntentRecord(session.userId, session.sessionBinding, now);
     return firestore.runTransaction(async tx => {
-      const currentSnap = await tx.get(userRef(session.userId));
-      if (!currentSnap.exists) throw new GoogleLinkIntentError();
-      const currentUser = adapterUser(currentSnap.id, currentSnap.data()!);
-      if (!(currentUser.emailVerified instanceof Date)) throw new GoogleLinkIntentError();
-      const resolved = await readEmailIdentity(firestore, tx, currentUser.email);
-      if (!resolved.keyExists || resolved.owner?.id !== session.userId) throw new GoogleLinkIntentError();
+      const connection = await googleConnectionStateInTransaction(tx, session.userId);
+      if (connection.googleConnected) return { status: "already_connected" as const };
+      if (!connection.canConnectGoogle) throw new GoogleLinkIntentError();
       const existing = await tx.get(ref);
       if (existing.exists) throw new GoogleLinkIntentError();
       tx.create(ref, record);
-      return { expiresAt: record.expiresAt };
+      return { status: "ready" as const, expiresAt: record.expiresAt };
     });
   }
 
@@ -350,6 +397,7 @@ export function createFirestoreIdentityStore(firestore: Firestore) {
     authAdapter: { ...baseAdapter, ...createVerificationTokenStore(firestore), getUser, getUserByAccount, getSessionAndUser, getUserByEmail, createUser, updateUser } satisfies Adapter,
     ensurePersistentGoogleIdentity: ensureGoogleIdentity,
     linkGoogleIdentityToUser: linkGoogleIdentity,
+    getGoogleConnectionStateForUser,
     createGoogleLinkIntentForSession,
     validateUnboundGoogleLinkIntent,
     bindGoogleLinkIntentToState,

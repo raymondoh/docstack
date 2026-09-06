@@ -111,6 +111,16 @@ Future production cleanup may enable Firestore TTL for collection group **authLi
 
 Phase 2A.3b2 must be the only first customer-facing creator. It must add a deliberate Link Google action, create and set the intent through the authenticated server primitive, initiate the immediately following Google journey, and provide Account Connections UI with clear retry/recovery behavior. Session presence, query flags and callback URLs remain insufficient authority.
 
+## Phase 2A.3b2: customer-activated Google connection
+
+`/dashboard/settings` is the first customer-accessible activation boundary. The customer proof chain is: authenticated Settings page → deliberate **Connect Google** click → Server Action creates one-time intent → Server Action sets its dedicated HttpOnly cookie → the client starts ordinary NextAuth Google OAuth → the exact NextAuth-generated state is bound → NextAuth validates state and PKCE on callback → Firestore links the Google account and consumes the intent atomically → the original canonical User remains unchanged.
+
+The Connect button is consent. A session by itself is not consent, the same email by itself is not authority, and query parameters are not proof. The Server Action passes only the incoming Cookie header to the existing canonical-session decoder, returns only `ready`, `already_connected` or `error`, and never serializes the intent token, User ID, provider identifiers or bindings. An authoritative Firestore read determines Connected/Not connected/unavailable; `?google=connected` produces a success notice only when that read independently confirms the mapping.
+
+Historical Google-first Users and explicitly linked email-first Users both display **Connected**, regardless of the method used for the current session. Verified email-first Users without a mapping may connect only the Google account with the same authoritative verified email. Malformed or ambiguous identity state fails closed and hides the action. Expected wrong-account and ownership-conflict callbacks consume the one-time intent and return a fixed generic Settings error. No unlink, replacement or account migration is introduced.
+
+Before activating Phase 2A.3b2 in production, enable Firestore TTL for collection group **authLinkIntents** on timestamp field **expiresAt**. Application checks remain authoritative and TTL is cleanup only. Never enable TTL on **authIdentityKeys**. The connection-state query uses the existing single-field `accounts.userId` index; this phase adds no composite index, environment variable, Firestore Rule change or provider configuration.
+
 ### Manual rollout after review, commit and disabled deployment
 
 NextAuth v4 routes standard sign-in errors (including `OAuthAccountNotLinked`, `OAuthSignin`, `OAuthCallback` and `OAuthCreateAccount`) through `/api/auth/signin` to `/login?error=...`, rather than `pages.error`. The login card displays these through the same static allowlist used by `/login/error`, without echoing raw query values. Existing sessions redirect to the restricted callback before showing any stale notice. A regression follows both installed NextAuth core redirects and then exercises the login state/notice used by the page; no OAuth traffic is sent.

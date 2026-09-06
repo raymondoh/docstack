@@ -3,7 +3,7 @@ import { after, before, beforeEach, describe, it } from "node:test";
 import { deleteApp, initializeApp, type App } from "firebase-admin/app";
 import { getFirestore, Timestamp, type Firestore } from "firebase-admin/firestore";
 import type { Session, User } from "next-auth";
-import type { JWT } from "next-auth/jwt";
+import { encode, type JWT } from "next-auth/jwt";
 import { AUTH_COLLECTIONS, AUTH_IDENTITY_KEYS } from "./collections";
 import { emailIdentityKeyId, IdentityConflictError } from "./identity-email";
 import { identityKeyRecord } from "./identity-records";
@@ -24,11 +24,14 @@ import {
   GOOGLE_LINK_INTENTS,
   GoogleLinkIntentError,
   createGoogleLinkIntentToken,
+  googleLinkIntentCookie,
   googleLinkIntentCookieName,
   googleLinkIntentDocumentId,
   googleLinkStateBinding
 } from "./google-link-intent";
 import { runGoogleLinkRequest } from "./google-link-request";
+import { createGoogleLinkService } from "./google-link-service-factory";
+import { googleConnectionRequest, runBeginGoogleConnection } from "./google-link-action";
 
 // Actual installed v4 core handler, not a mocked NextAuth flow.
 const { AuthHandler } = createRequire(import.meta.url)("../../../node_modules/next-auth/core/index.js");
@@ -776,6 +779,39 @@ describe("Firestore-backed persistent Google identity", { skip: skipReason }, ()
     assert.equal((await inspectIdentityKeys(firestore)).explicitGoogleLinks, 0);
   });
 
+  it("reads historical, explicit, unlinked and malformed Google connection state authoritatively", async () => {
+    await identityStore.ensurePersistentGoogleIdentity(account, profile);
+    assert.deepEqual(await identityStore.getGoogleConnectionStateForUser(subject), {
+      googleConnected: true, canConnectGoogle: false
+    });
+
+    await clearCollection(firestore, AUTH_COLLECTIONS.accounts);
+    await clearCollection(firestore, AUTH_COLLECTIONS.users);
+    await clearCollection(firestore, AUTH_IDENTITY_KEYS);
+    const user = await identityStore.authAdapter.createUser(emailInput);
+    assert.deepEqual(await identityStore.getGoogleConnectionStateForUser(user.id), {
+      googleConnected: false, canConnectGoogle: true
+    });
+    await identityStore.linkGoogleIdentityToUser(user.id, account, profile);
+    assert.deepEqual(await identityStore.getGoogleConnectionStateForUser(user.id), {
+      googleConnected: true, canConnectGoogle: false
+    });
+
+    await firestore.collection(AUTH_COLLECTIONS.accounts).doc(googleAccountDocumentId(subject))
+      .update({ linkingVersion: 2 });
+    assert.deepEqual(await identityStore.getGoogleConnectionStateForUser(user.id), {
+      googleConnected: false, canConnectGoogle: false
+    });
+  });
+
+  it("does not create an intent when the canonical User already has Google connected", async () => {
+    await identityStore.ensurePersistentGoogleIdentity(account, profile);
+    const result = await identityStore.createGoogleLinkIntentForSession(
+      { userId: subject, sessionBinding: linkSessionBinding }, createGoogleLinkIntentToken(), Timestamp.now());
+    assert.deepEqual(result, { status: "already_connected" });
+    assert.equal((await firestore.collection(GOOGLE_LINK_INTENTS).get()).size, 0);
+  });
+
   it("requires the current User, its owned identity key and the same verified Google email", async () => {
     const user = await identityStore.authAdapter.createUser(emailInput);
     await assert.rejects(identityStore.linkGoogleIdentityToUser("missing-user", account, profile), isConflict);
@@ -967,6 +1003,106 @@ describe("Firestore-backed persistent Google identity", { skip: skipReason }, ()
     await identityStore.bindGoogleLinkIntentToState(session, rawToken, linkState, linkSecret, now);
     return { rawToken, session, now };
   }
+
+  it("activates the complete explicit-link boundary without changing canonical ownership", async () => {
+    const user = await identityStore.authAdapter.createUser(emailInput);
+    const userBefore = (await firestore.collection(AUTH_COLLECTIONS.users).doc(user.id).get()).data();
+    const keyBefore = (await firestore.collection(AUTH_IDENTITY_KEYS).doc(keyId).get()).data();
+    const ownedOrder = { checkoutMode: "authenticated", userId: user.id, status: "paid" };
+    const guestOrder = { checkoutMode: "guest", userId: null, status: "paid" };
+    await firestore.collection("orders").doc("activation-owned").set(ownedOrder);
+    await firestore.collection("orders").doc("activation-guest").set(guestOrder);
+
+    const service = createGoogleLinkService("http://app.example.com", linkSecret, identityStore);
+    const sessionJwt = await encode({
+      secret: linkSecret, token: { sub: user.id, uid: user.id }, maxAge: 600
+    });
+    await assert.rejects(service.createGoogleLinkIntent(new Request("http://app.example.com/dashboard/settings")));
+    await assert.rejects(service.createGoogleLinkIntent(new Request("http://app.example.com/dashboard/settings", {
+      headers: { authorization: `Bearer ${sessionJwt}` }
+    })));
+    assert.equal((await firestore.collection(GOOGLE_LINK_INTENTS).get()).size, 0);
+    const sessionCookie = `next-auth.session-token=${sessionJwt}`;
+    let intentCookie: ReturnType<typeof googleLinkIntentCookie> | null = null;
+    const actionResult = await runBeginGoogleConnection(googleConnectionRequest(sessionCookie), {
+      create: service.createGoogleLinkIntent,
+      setCookie: async cookieValue => { intentCookie = cookieValue; }
+    });
+    assert.deepEqual(actionResult, { status: "ready" });
+    assert.deepEqual(Object.keys(actionResult), ["status"]);
+    assert.equal((await firestore.collection(GOOGLE_LINK_INTENTS).get()).size, 1);
+    assert.ok(intentCookie);
+    assert.equal(intentCookie.options.httpOnly, true);
+    assert.equal(intentCookie.options.path, "/api/auth");
+
+    const csrf = "activation-csrf";
+    const csrfCookie = csrf + "|" + createHash("sha256").update(csrf + linkSecret).digest("hex");
+    const options: NextAuthOptions = {
+      secret: linkSecret,
+      session: { strategy: "jwt" },
+      providers: [{
+        id: "google", name: "Google", type: "oauth",
+        authorization: { url: "https://accounts.example/authorize", params: {} },
+        token: "https://accounts.example/token",
+        userinfo: "https://accounts.example/userinfo",
+        clientId: "client", clientSecret: "secret", checks: ["pkce", "state"],
+        profile: value => ({ id: String(value.sub), email: String(value.email) })
+      }],
+      logger: { error() {}, warn() {}, debug() {} }
+    };
+    const browserCookies = `${sessionCookie}; ${intentCookie.name}=${intentCookie.value}`;
+    const initiationRequest = new Request("http://app.example.com/api/auth/signin/google", {
+      method: "POST", headers: { cookie: browserCookies }
+    });
+    const initiation = await runGoogleLinkRequest(initiationRequest, ["signin", "google"], options,
+      async scoped => {
+        const generated = await AuthHandler({
+          req: {
+            method: "POST", action: "signin", providerId: "google", query: {}, headers: {},
+            cookies: { "next-auth.csrf-token": csrfCookie },
+            body: { csrfToken: csrf, callbackUrl: "http://app.example.com/dashboard/settings?google=connected", json: "true" }
+          },
+          options: scoped
+        });
+        return new Response(null, { status: 302, headers: { location: generated.redirect } });
+      }, {
+        authUrl: "http://app.example.com", secureCookie: false,
+        session: service.runtime.session,
+        validate: service.runtime.validate,
+        bind: service.runtime.bind,
+        consume: service.runtime.consume
+      });
+    const state = new URL(initiation!.headers.get("location")!).searchParams.get("state");
+    assert.ok(state);
+
+    const callback = await runGoogleLinkRequest(new Request(
+      `http://app.example.com/api/auth/callback/google?state=${encodeURIComponent(state)}`,
+      { headers: { cookie: browserCookies } }
+    ), ["callback", "google"], options, async scoped => {
+      const allowed = await scoped.callbacks!.signIn!({ user: { id: subject }, account, profile });
+      assert.equal(allowed, true);
+      return new Response(null, {
+        status: 302, headers: { location: "http://app.example.com/dashboard/settings?google=connected" }
+      });
+    }, {
+      authUrl: "http://app.example.com", secureCookie: false,
+      session: service.runtime.session,
+      validate: service.runtime.validate,
+      bind: service.runtime.bind,
+      consume: service.runtime.consume
+    });
+    assert.equal(callback!.headers.get("location"),
+      "http://app.example.com/dashboard/settings?google=connected");
+    assert.equal((await firestore.collection(GOOGLE_LINK_INTENTS).get()).size, 0);
+    assert.deepEqual(await identityStore.getGoogleConnectionStateForUser(user.id), {
+      googleConnected: true, canConnectGoogle: false
+    });
+    assert.equal((await firestore.collection(AUTH_COLLECTIONS.users).doc(subject).get()).exists, false);
+    assert.deepEqual((await firestore.collection(AUTH_COLLECTIONS.users).doc(user.id).get()).data(), userBefore);
+    assert.deepEqual((await firestore.collection(AUTH_IDENTITY_KEYS).doc(keyId).get()).data(), keyBefore);
+    assert.deepEqual((await firestore.collection("orders").doc("activation-owned").get()).data(), ownedOrder);
+    assert.deepEqual((await firestore.collection("orders").doc("activation-guest").get()).data(), guestOrder);
+  });
 
   it("persists the exact OAuth state generated through installed NextAuth initiation", async () => {
     const user = await identityStore.authAdapter.createUser(emailInput);

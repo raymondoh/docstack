@@ -77,6 +77,22 @@ it("uses a request-local callback, consumes the exact callback state and clears 
   assert.match(result!.headers.get("set-cookie")!, /Max-Age=0/u);
 });
 
+it("routes an expected rejected link to the fixed Settings error without reusing the intent", async () => {
+  let callbackResult: boolean | string = true;
+  const result = await runGoogleLinkRequest(request("https://app.example.com/api/auth/callback/google?state=bound-state"),
+    ["callback", "google"], { providers: [] }, async options => {
+      callbackResult = await options.callbacks!.signIn!({
+        user: { id: "different-google-sub" },
+        account: { provider: "google", type: "oauth", providerAccountId: "different-google-sub" },
+        profile: { sub: "different-google-sub", email: "different@example.com", email_verified: true }
+      });
+      return new Response(null, { status: 302, headers: { location: String(callbackResult) } });
+    }, runtime({ consume: async () => ({ status: "rejected" as const }) }));
+  assert.equal(callbackResult, "https://app.example.com/dashboard/settings?google=error");
+  assert.equal(result!.headers.get("location"), callbackResult);
+  assert.match(result!.headers.get("set-cookie")!, /Max-Age=0/u);
+});
+
 it("fails closed before OAuth initiation when session or pending intent validation fails", async () => {
   let called = 0;
   const result = await runGoogleLinkRequest(request("https://app.example.com/api/auth/signin/google", "POST"),
