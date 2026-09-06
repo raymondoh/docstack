@@ -16,6 +16,15 @@ import {
 import { assertEstablishedEmail, IdentityConflictError, normalizeIdentityEmail } from "./identity-email";
 import { adapterUser, identityKeyRecord, readEmailIdentity } from "./identity-records";
 import { createVerificationTokenStore } from "./verification-tokens";
+import {
+  GOOGLE_LINK_INTENTS,
+  GoogleLinkIntentError,
+  googleLinkIntentDocumentId,
+  googleLinkIntentRecord,
+  googleLinkStateBinding,
+  type GoogleLinkSession,
+  validateGoogleLinkIntentRecord
+} from "./google-link-intent";
 
 export function createFirestoreIdentityStore(firestore: Firestore) {
   // The adapter has newer @auth/core types, but its runtime/schema contract is
@@ -203,11 +212,8 @@ export function createFirestoreIdentityStore(firestore: Firestore) {
     });
   }
 
-  async function linkGoogleIdentity(currentUserId: string, account: Account | null, profile: Profile | undefined) {
-    if (!validPersistentUserId(currentUserId)) throw new IdentityConflictError();
-    const identity = parseAuthoritativeGoogleIdentity(account, profile);
-    const linkedAt = Timestamp.now(); // Stable across transaction retries; never supplied by the client.
-    return firestore.runTransaction(async tx => {
+  async function linkGoogleIdentityInTransaction(tx: FirebaseFirestore.Transaction, currentUserId: string,
+    identity: ReturnType<typeof parseAuthoritativeGoogleIdentity>, linkedAt: Timestamp) {
       const currentSnap = await tx.get(userRef(currentUserId));
       if (!currentSnap.exists) throw new IdentityConflictError();
       const currentUser = adapterUser(currentSnap.id, currentSnap.data()!);
@@ -242,6 +248,88 @@ export function createFirestoreIdentityStore(firestore: Firestore) {
         ? googleAccountRecord(identity)
         : explicitGoogleAccountRecord(identity, currentUserId, resolved.keyRef.id, linkedAt));
       return { userId: currentUserId, alreadyLinked: false };
+  }
+
+  async function linkGoogleIdentity(currentUserId: string, account: Account | null, profile: Profile | undefined) {
+    if (!validPersistentUserId(currentUserId)) throw new IdentityConflictError();
+    const identity = parseAuthoritativeGoogleIdentity(account, profile);
+    const linkedAt = Timestamp.now(); // Stable across transaction retries; never supplied by the client.
+    return firestore.runTransaction(tx => linkGoogleIdentityInTransaction(tx, currentUserId, identity, linkedAt));
+  }
+
+  function assertIntentSession(data: FirebaseFirestore.DocumentData | undefined, session: GoogleLinkSession,
+    now: Timestamp, requireState: boolean) {
+    const intent = validateGoogleLinkIntentRecord(data, now);
+    if (intent.userId !== session.userId || intent.sessionBinding !== session.sessionBinding ||
+        (requireState ? intent.stateBinding === null : intent.stateBinding !== null)) {
+      throw new GoogleLinkIntentError();
+    }
+    return intent;
+  }
+
+  async function createGoogleLinkIntentForSession(session: GoogleLinkSession, rawToken: string,
+    now = Timestamp.now()) {
+    const ref = firestore.collection(GOOGLE_LINK_INTENTS).doc(googleLinkIntentDocumentId(rawToken));
+    const record = googleLinkIntentRecord(session.userId, session.sessionBinding, now);
+    return firestore.runTransaction(async tx => {
+      const currentSnap = await tx.get(userRef(session.userId));
+      if (!currentSnap.exists) throw new GoogleLinkIntentError();
+      const currentUser = adapterUser(currentSnap.id, currentSnap.data()!);
+      if (!(currentUser.emailVerified instanceof Date)) throw new GoogleLinkIntentError();
+      const resolved = await readEmailIdentity(firestore, tx, currentUser.email);
+      if (!resolved.keyExists || resolved.owner?.id !== session.userId) throw new GoogleLinkIntentError();
+      const existing = await tx.get(ref);
+      if (existing.exists) throw new GoogleLinkIntentError();
+      tx.create(ref, record);
+      return { expiresAt: record.expiresAt };
+    });
+  }
+
+  async function validateUnboundGoogleLinkIntent(session: GoogleLinkSession, rawToken: string,
+    now = Timestamp.now()) {
+    const snap = await firestore.collection(GOOGLE_LINK_INTENTS).doc(googleLinkIntentDocumentId(rawToken)).get();
+    assertIntentSession(snap.data(), session, now, false);
+  }
+
+  async function bindGoogleLinkIntentToState(session: GoogleLinkSession, rawToken: string, state: string,
+    secret: string, now = Timestamp.now()) {
+    const ref = firestore.collection(GOOGLE_LINK_INTENTS).doc(googleLinkIntentDocumentId(rawToken));
+    const stateBinding = googleLinkStateBinding(state, secret);
+    return firestore.runTransaction(async tx => {
+      const snap = await tx.get(ref);
+      assertIntentSession(snap.data(), session, now, false);
+      tx.update(ref, { stateBinding });
+    });
+  }
+
+  async function consumeGoogleLinkIntentAndLink(session: GoogleLinkSession, rawToken: string, state: string,
+    secret: string, account: Account | null, profile: Profile | undefined, now = Timestamp.now()) {
+    const ref = firestore.collection(GOOGLE_LINK_INTENTS).doc(googleLinkIntentDocumentId(rawToken));
+    const expectedStateBinding = googleLinkStateBinding(state, secret);
+    let identity: ReturnType<typeof parseAuthoritativeGoogleIdentity> | null = null;
+    try {
+      identity = parseAuthoritativeGoogleIdentity(account, profile);
+    } catch {
+      // A completed but unusable Google selection is terminal for this consent.
+    }
+    const linkedAt = Timestamp.now();
+    return firestore.runTransaction(async tx => {
+      const snap = await tx.get(ref);
+      const intent = assertIntentSession(snap.data(), session, now, true);
+      if (intent.stateBinding !== expectedStateBinding) throw new GoogleLinkIntentError();
+      if (!identity) {
+        tx.delete(ref);
+        return { status: "rejected" as const };
+      }
+      try {
+        const result = await linkGoogleIdentityInTransaction(tx, session.userId, identity, linkedAt);
+        tx.delete(ref);
+        return { status: "linked" as const, result };
+      } catch (error) {
+        if (!(error instanceof IdentityConflictError)) throw error;
+        tx.delete(ref);
+        return { status: "rejected" as const };
+      }
     });
   }
 
@@ -262,6 +350,10 @@ export function createFirestoreIdentityStore(firestore: Firestore) {
     authAdapter: { ...baseAdapter, ...createVerificationTokenStore(firestore), getUser, getUserByAccount, getSessionAndUser, getUserByEmail, createUser, updateUser } satisfies Adapter,
     ensurePersistentGoogleIdentity: ensureGoogleIdentity,
     linkGoogleIdentityToUser: linkGoogleIdentity,
+    createGoogleLinkIntentForSession,
+    validateUnboundGoogleLinkIntent,
+    bindGoogleLinkIntentToState,
+    consumeGoogleLinkIntentAndLink,
     seedIdentityKey
   };
 }

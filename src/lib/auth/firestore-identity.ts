@@ -8,3 +8,7 @@ const identityStore = createFirestoreIdentityStore(adminDb);
 export const authAdapter = identityStore.authAdapter;
 export const ensurePersistentGoogleIdentity = identityStore.ensurePersistentGoogleIdentity;
 export const linkGoogleIdentityToUser = identityStore.linkGoogleIdentityToUser;
+export const createGoogleLinkIntentForSession = identityStore.createGoogleLinkIntentForSession;
+export const validateUnboundGoogleLinkIntent = identityStore.validateUnboundGoogleLinkIntent;
+export const bindGoogleLinkIntentToState = identityStore.bindGoogleLinkIntentToState;
+export const consumeGoogleLinkIntentAndLink = identityStore.consumeGoogleLinkIntentAndLink;

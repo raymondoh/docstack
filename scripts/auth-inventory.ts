@@ -2,12 +2,13 @@ import { createHash } from "node:crypto";
 import { loadEnvConfig } from "@next/env";
 import { AUTH_COLLECTIONS } from "../src/lib/auth/collections";
 import { inspectIdentityKeys, opaqueId } from "../src/lib/auth/identity-inventory";
+import { GOOGLE_LINK_INTENTS } from "../src/lib/auth/google-link-intent";
 
 const CONFIRMATION = "READ_ONLY_AUTH_INVENTORY";
 const PAGE_SIZE = 500;
 const SAMPLE_LIMIT = 20;
 const APP_COLLECTIONS = ["checkoutAttempts", "orders", "products", "stripeWebhookEvents"] as const;
-const AUTH_SUPPORT_COLLECTIONS = ["authIdentityKeys"] as const;
+const AUTH_SUPPORT_COLLECTIONS = ["authIdentityKeys", GOOGLE_LINK_INTENTS] as const;
 
 type OrderSummary = {
   count: number;
